@@ -1,0 +1,48 @@
+name: Build Redfin Mainline Kernel & postmarketOS Initramfs
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux kernel cross-compile & Android boot image dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc bison flex libssl-dev libelf-dev libncurses-dev \
+            dwarves cpio gzip xz-utils zstd ccache \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
+            device-tree-compiler mkbootimg android-sdk-libsparse-utils e2fsprogs \
+            p7zip-full libdrm-dev qemu-user-static binfmt-support curl python3
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: redfin-kernel-ccache-${{ github.sha }}
+          restore-keys: |
+            redfin-kernel-ccache-
+
+      - name: Build Kernel, DTB, Firmware, Initramfs, and boot-redfin.img
+        run: |
+          chmod +x scripts/build_all_ci.sh
+          ./scripts/build_all_ci.sh
+
+      - name: Upload Redfin Boot Image & Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: redfin-postmarketos-images
+          path: |
+            artifacts/boot-redfin.img
+            artifacts/Image.gz
+            artifacts/sm7250-google-redfin.dtb
+            artifacts/initramfs.cpio.gz
+            artifacts/redfin-firmware.tar.gz
+          retention-days: 30

@@ -1,0 +1,229 @@
+#!/bin/sh
+# Initramfs for Google Pixel 5 (redfin):
+# - USB network (NCM) + serial (ACM) gadget, telnet shell on 172.16.42.1
+# - Populates /dev/disk/by-partlabel/* from UFS GPT partitions
+# - Mounts stock modem_b/modem_a partition read-only to supply signed MPSS/ADSP/Wi-Fi firmware
+# - Starts rmtfs + pd-mapper + MPSS remoteproc for WCN3990 Wi-Fi (wlan0)
+# - Draws live hardware status on the Samsung S6E3HC2 OLED panel via DRM/KMS
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs dev /dev
+mkdir -p /dev/pts /dev/disk/by-partlabel /run /tmp /mnt/modem
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+mount -t configfs configfs /sys/kernel/config 2>/dev/null
+
+# Feed hardware watchdog if enabled
+[ -c /dev/watchdog0 ] && watchdog -t 5 -T 30 /dev/watchdog0
+
+# Save previous boot ramoops console logs if present
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+mkdir -p /run/prev-boot
+cp /sys/fs/pstore/* /run/prev-boot/ 2>/dev/null
+
+hostname redfin
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
+
+# --- USB gadget (NCM network + ACM serial) ---
+G=/sys/kernel/config/usb_gadget/g1
+mkdir -p $G
+echo 0x1d6b > $G/idVendor
+echo 0x0104 > $G/idProduct
+mkdir -p $G/strings/0x409
+echo redfin-linux > $G/strings/0x409/serialnumber
+echo Google > $G/strings/0x409/manufacturer
+echo "Pixel 5 Mainline Linux" > $G/strings/0x409/product
+mkdir -p $G/configs/c.1/strings/0x409
+echo "ncm+acm" > $G/configs/c.1/strings/0x409/configuration
+mkdir -p $G/functions/ncm.usb0
+echo 02:72:65:64:66:01 > $G/functions/ncm.usb0/host_addr
+echo 02:72:65:64:66:02 > $G/functions/ncm.usb0/dev_addr
+ln -s $G/functions/ncm.usb0 $G/configs/c.1/
+mkdir -p $G/functions/acm.GS0 && ln -s $G/functions/acm.GS0 $G/configs/c.1/
+
+i=0
+while [ $i -lt 20 ]; do
+	UDC=$(ls /sys/class/udc 2>/dev/null | head -n1)
+	[ -n "$UDC" ] && break
+	sleep 1; i=$((i + 1))
+done
+echo "redfin-init: udc=${UDC:-none}" > /dev/kmsg
+[ -n "$UDC" ] && echo "$UDC" > $G/UDC
+
+ifconfig lo 127.0.0.1 up
+i=0
+while [ $i -lt 10 ] && ! ifconfig usb0 >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
+ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up 2>/dev/null
+
+cat > /etc/udhcpd.conf <<EOF
+start 172.16.42.2
+end 172.16.42.2
+interface usb0
+option subnet 255.255.255.0
+option lease 86400
+lease_file /run/udhcpd.leases
+EOF
+touch /run/udhcpd.leases
+if command -v busybox-extras >/dev/null 2>&1; then
+	busybox-extras udhcpd /etc/udhcpd.conf
+	busybox-extras telnetd -l /bin/sh
+else
+	udhcpd /etc/udhcpd.conf 2>/dev/null
+	telnetd -l /bin/sh 2>/dev/null
+fi
+
+[ -c /dev/ttyGS0 ] && (while :; do setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done) &
+
+echo "redfin-init: network up, telnet 172.16.42.1" > /dev/kmsg
+
+# --- Populate /dev/disk/by-partlabel from UFS block devices ---
+populate_partlabels() {
+	i=0
+	while [ $i -lt 15 ]; do
+		ls /sys/class/block/sd* >/dev/null 2>&1 && break
+		sleep 1; i=$((i + 1))
+	done
+	for u in /sys/class/block/sd*/uevent; do
+		[ -e "$u" ] || continue
+		dev=$(basename "$(dirname "$u")")
+		part=$(awk -F= '/^PARTNAME=/{print $2}' "$u")
+		[ -n "$part" ] && ln -sf "/dev/$dev" "/dev/disk/by-partlabel/$part"
+	done
+}
+populate_partlabels
+
+# --- Mount stock modem partition & wire firmware for MPSS / WCN3990 Wi-Fi ---
+setup_firmware_and_wifi() {
+	FW_DIR=/lib/firmware/qcom/sm7250/google/redfin
+	ATH_DIR=/lib/firmware/ath10k/WCN3990/hw1.0
+	mkdir -p "$FW_DIR" "$ATH_DIR"
+
+	for slot in modem_b modem_a; do
+		if [ -b "/dev/disk/by-partlabel/$slot" ]; then
+			if mount -t vfat -o ro "/dev/disk/by-partlabel/$slot" /mnt/modem 2>/dev/null; then
+				echo "redfin-init: mounted $slot at /mnt/modem" > /dev/kmsg
+				break
+			fi
+		fi
+	done
+
+	if [ -d /mnt/modem/image ]; then
+		for f in /mnt/modem/image/*; do
+			[ -e "$f" ] && ln -sf "$f" "$FW_DIR/$(basename "$f")"
+		done
+		[ -e /mnt/modem/image/wlanmdsp.mbn ] && ln -sf /mnt/modem/image/wlanmdsp.mbn "$ATH_DIR/wlanmdsp.mbn"
+	fi
+
+	# Start Qualcomm userspace services needed by MPSS and wlan_pd
+	if command -v pd-mapper >/dev/null 2>&1; then
+		pd-mapper &
+	fi
+	if command -v rmtfs >/dev/null 2>&1; then
+		rmtfs -r -P -s >/run/rmtfs.log 2>&1 &
+		sleep 1
+	fi
+
+	# Boot MPSS remoteproc (which hosts WCN3990 wlan_pd)
+	for r in /sys/class/remoteproc/remoteproc*; do
+		[ -e "$r/name" ] || continue
+		rname=$(cat "$r/name" 2>/dev/null)
+		case "$rname" in
+			*mpss*|*modem*)
+				state=$(cat "$r/state" 2>/dev/null)
+				if [ "$state" != "running" ]; then
+					echo "redfin-init: starting remoteproc $rname ($r)" > /dev/kmsg
+					echo start > "$r/state" 2>/dev/null
+				fi
+				;;
+		esac
+	done
+
+	# Wait up to 8s for wlan0; if pd-mapper needs re-announcement, restart pd-mapper once
+	w=0
+	while [ $w -lt 8 ] && [ ! -d /sys/class/net/wlan0 ]; do
+		sleep 1; w=$((w + 1))
+	done
+	if [ ! -d /sys/class/net/wlan0 ] && command -v pd-mapper >/dev/null 2>&1; then
+		killall pd-mapper 2>/dev/null
+		sleep 1
+		pd-mapper &
+	fi
+	w=0
+	while [ $w -lt 10 ] && [ ! -d /sys/class/net/wlan0 ]; do
+		sleep 1; w=$((w + 1))
+	done
+	if [ -d /sys/class/net/wlan0 ]; then
+		ifconfig wlan0 up 2>/dev/null
+		echo "redfin-init: wlan0 is UP" > /dev/kmsg
+	fi
+}
+setup_firmware_and_wifi &
+
+# --- Optional switch_root to postmarketOS on UFS if requested ---
+if grep -qw redfin.boot=pmos /proc/cmdline; then
+	i=0
+	while [ $i -lt 10 ]; do
+		rootdev=$(findfs LABEL=pmos_root 2>/dev/null || findfs LABEL=redfinroot 2>/dev/null) && [ -n "$rootdev" ] && break
+		sleep 1; i=$((i + 1))
+	done
+	mkdir -p /newroot
+	if [ -n "$rootdev" ] && mount -o noatime "$rootdev" /newroot && [ -x /newroot/sbin/init ]; then
+		echo "redfin-init: switching root to postmarketOS on $rootdev" > /dev/kmsg
+		killall watchdog 2>/dev/null
+		umount /sys/fs/pstore /sys/kernel/config 2>/dev/null
+		for m in dev proc sys run; do mount -o move /$m /newroot/$m; done
+		exec switch_root /newroot /sbin/init
+	fi
+	umount /newroot 2>/dev/null
+fi
+
+# --- OLED panel status display ---
+render_status() {
+	{
+		echo "Google Pixel 5 (redfin)"
+		echo "postmarketOS / Linux $(uname -r)"
+		echo "----------------------------------"
+		echo "CPU : $(nproc)x Kryo 475 (SM7250)"
+		FREQ=$(cat /sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq 2>/dev/null)
+		[ -n "$FREQ" ] && echo "      Prime core @ $((FREQ / 1000)) MHz"
+		echo "RAM : $(awk '/MemTotal/{printf "%d MB", $2/1024}' /proc/meminfo)"
+		if [ -e /dev/dri/card0 ]; then
+			echo "GPU : Adreno 620 (/dev/dri/card0)"
+		else
+			echo "GPU : probing..."
+		fi
+		UFS_DEVS=$(ls /dev/sd[a-z] 2>/dev/null | tr '\n' ' ')
+		echo "UFS : ${UFS_DEVS:-probing...}"
+		if [ -d /sys/class/net/wlan0 ]; then
+			W_MAC=$(cat /sys/class/net/wlan0/address 2>/dev/null)
+			echo "WiFi: wlan0 UP ($W_MAC)"
+		else
+			echo "WiFi: initializing MPSS/ath10k..."
+		fi
+		echo "USB : usb0 172.16.42.1 (telnet)"
+		echo "Time: up $(cut -d' ' -f1 /proc/uptime)s"
+	} > /run/status.txt
+}
+
+status_screen() {
+	i=0
+	while [ $i -lt 20 ] && [ ! -e /dev/dri/card0 ]; do sleep 1; i=$((i + 1)); done
+	for b in /sys/class/backlight/*; do
+		[ -e "$b/brightness" ] && echo $(( $(cat "$b/max_brightness") / 2 )) > "$b/brightness" 2>/dev/null
+	done
+	render_status
+	drmtext -s 3 /run/status.txt > /run/drmtext.log 2>&1 &
+	DRM_PID=$!
+	# Refresh screen after Wi-Fi / remoteproc finishes bringing up wlan0
+	sleep 12
+	render_status
+	kill "$DRM_PID" 2>/dev/null
+	wait "$DRM_PID" 2>/dev/null
+	drmtext -s 3 /run/status.txt >> /run/drmtext.log 2>&1 &
+}
+status_screen &
+
+while :; do sleep 3600; done

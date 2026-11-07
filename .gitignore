@@ -1,0 +1,7 @@
+stock-rq3a/
+artifacts/
+fw_work/
+fw_out/
+avicii-mainline/.git
+*.pyc
+__pycache__/
