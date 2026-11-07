@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euxo pipefail
+export PATH="/usr/sbin:/sbin:$PATH"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="${WORK_DIR:-/tmp/redfin-build}"
@@ -17,10 +18,10 @@ mkdir -p "$FW_OUT/qcom" "$FW_OUT/ath10k/WCN3990/hw1.0"
 
 python3 "$REPO_ROOT/scripts/extract_fw_ci.py" "$WORK_DIR/fw_work" "$FW_OUT"
 
-LFW_BASE="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain"
-curl -fsSL "$LFW_BASE/qcom/a650_sqe.fw" -o "$FW_OUT/qcom/a650_sqe.fw"
-curl -fsSL "$LFW_BASE/qcom/a650_gmu.bin" -o "$FW_OUT/qcom/a650_gmu.bin"
-curl -fsSL "$LFW_BASE/ath10k/WCN3990/hw1.0/firmware-5.bin" -o "$FW_OUT/ath10k/WCN3990/hw1.0/firmware-5.bin"
+LFW_GITLAB="https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main"
+[ -f "$FW_OUT/qcom/a650_sqe.fw" ] || curl -fsSL "$LFW_GITLAB/qcom/a650_sqe.fw" -o "$FW_OUT/qcom/a650_sqe.fw"
+[ -f "$FW_OUT/qcom/a650_gmu.bin" ] || curl -fsSL "$LFW_GITLAB/qcom/a650_gmu.bin" -o "$FW_OUT/qcom/a650_gmu.bin"
+curl -fsSL "$LFW_GITLAB/ath10k/WCN3990/hw1.0/firmware-5.bin" -o "$FW_OUT/ath10k/WCN3990/hw1.0/firmware-5.bin"
 
 tar -C "$FW_OUT" -czf "$ARTIFACTS_DIR/redfin-firmware.tar.gz" .
 
@@ -134,7 +135,7 @@ aarch64-linux-gnu-gcc -O2 -static \
     -o "$WORK_DIR/rebootto" "$REPO_ROOT/avicii-mainline/tools/rebootto.c"
 
 INIT_ROOT="$WORK_DIR/initramfs_root"
-rm -rf "$INIT_ROOT" && mkdir -p "$INIT_ROOT"
+sudo rm -rf "$INIT_ROOT" && mkdir -p "$INIT_ROOT"
 
 ALPINE_VER="3.21.3"
 ALPINE_TAR="$WORK_DIR/alpine-minirootfs-${ALPINE_VER}-aarch64.tar.gz"
@@ -142,8 +143,6 @@ curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-
     -o "$ALPINE_TAR"
 sudo tar -xzf "$ALPINE_TAR" -C "$INIT_ROOT"
 
-# Install busybox-extras, rmtfs, pd-mapper, iw, wpa_supplicant into the aarch64 rootfs via qemu-user-static
-sudo cp /usr/bin/qemu-aarch64-static "$INIT_ROOT/usr/bin/"
 sudo cp /etc/resolv.conf "$INIT_ROOT/etc/resolv.conf"
 sudo tee "$INIT_ROOT/etc/apk/repositories" >/dev/null <<EOF
 http://dl-cdn.alpinelinux.org/alpine/v3.21/main
@@ -164,7 +163,6 @@ sudo chroot "$INIT_ROOT" /sbin/apk add --no-cache \
     iproute2 \
     util-linux-misc || true
 
-sudo rm -f "$INIT_ROOT/usr/bin/qemu-aarch64-static"
 sudo rm -rf "$INIT_ROOT/var/cache/apk"/*
 
 # Install Redfin GPU & Wi-Fi firmware into initramfs

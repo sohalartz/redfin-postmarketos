@@ -20,7 +20,7 @@ jobs:
             dwarves cpio gzip xz-utils zstd ccache \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
             device-tree-compiler mkbootimg android-sdk-libsparse-utils e2fsprogs \
-            p7zip-full libdrm-dev qemu-user-static binfmt-support curl python3
+            p7zip-full libdrm-dev qemu-user qemu-user-binfmt curl python3
 
       - name: Cache ccache
         uses: actions/cache@v4

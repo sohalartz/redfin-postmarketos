@@ -3,11 +3,13 @@
 Extract Google Pixel 5 (redfin) firmware blobs needed for Mainline Linux / postmarketOS
 directly from Google's official RQ3A.211001.001 factory image using HTTP Range requests:
   1. radio.img -> modem.img (FAT16) -> bdwlan.* -> ath10k/WCN3990/hw1.0/redfin/board-2.bin
-  2. vendor.img -> firmware/a620_zap.* -> qcom/sm7250/google/redfin/a620_zap.*
+  2. vendor.img -> firmware/a620_zap.* (+ a650_sqe.fw, a650_gmu.bin)
 """
+import glob
 import os
-import subprocess
+import shutil
 import struct
+import subprocess
 import sys
 import urllib.request
 import zlib
@@ -98,7 +100,6 @@ def extract_entry_streaming(offset_base, entry, out_path):
 
 def carve_modem_fat(radio_path, modem_out_path):
     data = open(radio_path, "rb").read()
-    # Scan 512-byte aligned offsets for FAT16 boot sector ("FAT16   " at +54 and 0x55AA at +510)
     pos = 0
     while True:
         idx = data.find(b"FAT16   ", pos)
@@ -126,8 +127,10 @@ def main():
     mkboard2 = os.path.join(repo_root, "avicii-mainline", "tools", "mkboard2.py")
 
     os.makedirs(work_dir, exist_ok=True)
+    qcom_base_dir = os.path.join(fw_root, "qcom")
     qcom_dir = os.path.join(fw_root, "qcom", "sm7250", "google", "redfin")
     ath_redfin_dir = os.path.join(fw_root, "ath10k", "WCN3990", "hw1.0", "redfin")
+    os.makedirs(qcom_base_dir, exist_ok=True)
     os.makedirs(qcom_dir, exist_ok=True)
     os.makedirs(ath_redfin_dir, exist_ok=True)
 
@@ -151,36 +154,49 @@ def main():
                         vendor_sparse_path,
                     )
 
-    # 1. Extract bdwlan.* from modem.img and generate board-2.bin
+    # 1. Mount modem.img via loop device (or 7z fallback) to extract bdwlan.* and build board-2.bin
     modem_path = os.path.join(work_dir, "modem.img")
     carve_modem_fat(radio_path, modem_path)
     bdwlan_dir = os.path.join(work_dir, "bdwlan")
     os.makedirs(bdwlan_dir, exist_ok=True)
-    subprocess.run(
-        ["7z", "e", "-y", f"-o{bdwlan_dir}", modem_path, "image/bdwlan.*"],
-        check=False,
-    )
+    mnt_modem = os.path.join(work_dir, "mnt_modem")
+    os.makedirs(mnt_modem, exist_ok=True)
+    r = subprocess.run(["sudo", "mount", "-t", "vfat", "-o", "ro,loop", modem_path, mnt_modem], check=False)
+    if r.returncode == 0:
+        try:
+            for p in glob.glob(os.path.join(mnt_modem, "image", "bdwlan*")):
+                shutil.copy2(p, os.path.join(bdwlan_dir, os.path.basename(p)))
+        finally:
+            subprocess.run(["sudo", "umount", mnt_modem], check=False)
+    else:
+        subprocess.run(["7z", "e", "-y", f"-o{bdwlan_dir}", modem_path, "image/bdwlan*"], check=False)
+
     board2_out = os.path.join(ath_redfin_dir, "board-2.bin")
     subprocess.run([sys.executable, mkboard2, board2_out, bdwlan_dir], check=True)
+    # Also copy board-2.bin to parent hw1.0/board-2.bin as fallback
+    shutil.copy2(board2_out, os.path.join(os.path.dirname(ath_redfin_dir), "board-2.bin"))
 
-    # 2. Extract a620_zap.* from vendor.img
+    # 2. Convert sparse vendor.img -> vendor.raw.img and mount via loop to extract a620_zap.*
     vendor_raw_path = os.path.join(work_dir, "vendor.raw.img")
     subprocess.run(["simg2img", vendor_sparse_path, vendor_raw_path], check=True)
-    subprocess.run(
-        ["debugfs", "-R", f"rdump /firmware {work_dir}", vendor_raw_path],
-        check=True,
-    )
-    fw_extracted = os.path.join(work_dir, "firmware")
+    mnt_vendor = os.path.join(work_dir, "mnt_vendor")
+    os.makedirs(mnt_vendor, exist_ok=True)
     zap_count = 0
-    if os.path.isdir(fw_extracted):
-        for fn in sorted(os.listdir(fw_extracted)):
-            if fn.startswith("a620_zap."):
-                src_f = os.path.join(fw_extracted, fn)
-                dst_f = os.path.join(qcom_dir, fn)
-                with open(src_f, "rb") as sf, open(dst_f, "wb") as df:
-                    df.write(sf.read())
+    r = subprocess.run(["sudo", "mount", "-o", "ro,loop", vendor_raw_path, mnt_vendor], check=False)
+    if r.returncode == 0:
+        try:
+            for p in glob.glob(os.path.join(mnt_vendor, "firmware", "a620_zap.*")):
+                dst = os.path.join(qcom_dir, os.path.basename(p))
+                shutil.copy2(p, dst)
                 zap_count += 1
-                print(f"Extracted GPU zap shader firmware: {dst_f}")
+                print(f"Extracted GPU zap shader firmware: {dst}")
+            for extra in ("a650_sqe.fw", "a650_gmu.bin"):
+                p = os.path.join(mnt_vendor, "firmware", extra)
+                if os.path.exists(p):
+                    shutil.copy2(p, os.path.join(qcom_base_dir, extra))
+        finally:
+            subprocess.run(["sudo", "umount", mnt_vendor], check=False)
+
     if zap_count == 0:
         raise RuntimeError("Failed to extract a620_zap.* from vendor.img")
 
