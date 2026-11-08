@@ -12,6 +12,7 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/reboot.h>
 #include <unistd.h>
 #include <drm/drm.h>
 #include <drm/drm_mode.h>
@@ -465,15 +466,20 @@ static void execute_action(int action_id) {
             draw_text_centered(0, 1000, W, 100, "RESTARTING HOME SERVER...", 3, COLOR_YELLOW);
             commit_frame();
             sync();
-            system("reboot");
-            break;
+            sleep(1);
+            reboot(RB_AUTOBOOT);
+            system("reboot -f || busybox reboot -f");
+            exit(0);
         case 203: // Shutdown
             fill_rect(0, 0, W, H, 0x00000000);
             draw_text_centered(0, 1000, W, 100, "SHUTTING DOWN SERVER...", 3, COLOR_RED);
             commit_frame();
             sync();
-            system("poweroff");
-            break;
+            sleep(1);
+            set_display_blank(1);
+            reboot(RB_POWER_OFF);
+            system("poweroff -f || busybox poweroff -f");
+            exit(0);
         case 204: // Cancel Power Popup
             cur_state = STATE_MAIN;
             focus_idx = 2; // return focus to Power Menu button
