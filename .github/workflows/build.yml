@@ -22,19 +22,25 @@ jobs:
             device-tree-compiler mkbootimg android-sdk-libsparse-utils e2fsprogs \
             p7zip-full libdrm-dev qemu-user qemu-user-binfmt curl python3
 
-      - name: Cache ccache
-        uses: actions/cache@v4
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
           key: redfin-kernel-ccache-${{ github.sha }}
           restore-keys: |
             redfin-kernel-ccache-
-          save-always: true
 
       - name: Build Kernel, DTB, Firmware, Initramfs, and boot-redfin.img
         run: |
           chmod +x scripts/build_all_ci.sh
           ./scripts/build_all_ci.sh
+
+      - name: Save ccache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.ccache
+          key: redfin-kernel-ccache-${{ github.sha }}
 
       - name: Upload Redfin Boot Image & Artifacts
         uses: actions/upload-artifact@v4

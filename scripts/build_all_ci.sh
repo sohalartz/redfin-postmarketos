@@ -5,28 +5,31 @@ export PATH="/usr/sbin:/sbin:$PATH"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="${WORK_DIR:-/tmp/redfin-build}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$REPO_ROOT/artifacts}"
-LINUX_TAG="${LINUX_TAG:-v7.3-rc7}"
+LINUX_TAG="v7.3-rc7"
 
 mkdir -p "$WORK_DIR" "$ARTIFACTS_DIR"
 
 # ---------------------------------------------------------------------------
-# 1. Extract Google Pixel 5 (redfin) signed GPU & Wi-Fi board firmware
-#    and fetch upstream linux-firmware blobs (a650_sqe.fw, a650_gmu.bin, WCN3990 firmware-5.bin)
+# 1. Extract & package Redfin firmware (GPU zap, board-2.bin, firmware-5.bin)
 # ---------------------------------------------------------------------------
 FW_OUT="$WORK_DIR/fw_out"
 mkdir -p "$FW_OUT/qcom" "$FW_OUT/ath10k/WCN3990/hw1.0"
-
 python3 "$REPO_ROOT/scripts/extract_fw_ci.py" "$WORK_DIR/fw_work" "$FW_OUT"
 
 LFW_GITLAB="https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main"
-[ -f "$FW_OUT/qcom/a650_sqe.fw" ] || curl -fsSL "$LFW_GITLAB/qcom/a650_sqe.fw" -o "$FW_OUT/qcom/a650_sqe.fw"
-[ -f "$FW_OUT/qcom/a650_gmu.bin" ] || curl -fsSL "$LFW_GITLAB/qcom/a650_gmu.bin" -o "$FW_OUT/qcom/a650_gmu.bin"
-curl -fsSL "$LFW_GITLAB/ath10k/WCN3990/hw1.0/firmware-5.bin" -o "$FW_OUT/ath10k/WCN3990/hw1.0/firmware-5.bin"
+if [ ! -f "$FW_OUT/qcom/a650_sqe.fw" ]; then
+    curl -fsSL "$LFW_GITLAB/qcom/a650_sqe.fw" -o "$FW_OUT/qcom/a650_sqe.fw"
+fi
+if [ ! -f "$FW_OUT/qcom/a650_gmu.bin" ]; then
+    curl -fsSL "$LFW_GITLAB/qcom/a650_gmu.bin" -o "$FW_OUT/qcom/a650_gmu.bin"
+fi
+curl -fsSL "$LFW_GITLAB/ath10k/WCN3990/hw1.0/firmware-5.bin" \
+    -o "$FW_OUT/ath10k/WCN3990/hw1.0/firmware-5.bin"
 
 tar -C "$FW_OUT" -czf "$ARTIFACTS_DIR/redfin-firmware.tar.gz" .
 
 # ---------------------------------------------------------------------------
-# 2. Clone Linux kernel & apply SM7250 + Redfin patches
+# 2. Clone Linux v7.3-rc7 & apply SM7250 patches + Redfin DTB + S6E3HC2 panel
 # ---------------------------------------------------------------------------
 LINUX_SRC="$WORK_DIR/linux"
 if [ ! -d "$LINUX_SRC" ]; then
@@ -71,24 +74,10 @@ if ! grep -q "panel-samsung-s6e3hc2.o" drivers/gpu/drm/panel/Makefile; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Configure and build Kernel + DTB
+# 3. Build static helper tools & Alpine aarch64 initramfs with firmware FIRST
+#    (fast fail-safe verification before kernel compile)
 # ---------------------------------------------------------------------------
-OUT_DIR="$WORK_DIR/out"
-make O="$OUT_DIR" ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" defconfig
-ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O "$OUT_DIR" "$OUT_DIR/.config" \
-    "$REPO_ROOT"/avicii-mainline/config/avicii*.config \
-    "$REPO_ROOT/config/redfin.config"
-make O="$OUT_DIR" ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" olddefconfig
-make O="$OUT_DIR" ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" -j"$(nproc)" \
-    Image.gz qcom/sm7250-google-redfin.dtb
-
-cp "$OUT_DIR/arch/arm64/boot/Image.gz" "$ARTIFACTS_DIR/Image.gz"
-cp "$OUT_DIR/arch/arm64/boot/dts/qcom/sm7250-google-redfin.dtb" "$ARTIFACTS_DIR/sm7250-google-redfin.dtb"
-
-# ---------------------------------------------------------------------------
-# 4. Build static helper tools & Alpine aarch64 initramfs with firmware
-# ---------------------------------------------------------------------------
-aarch64-linux-gnu-gcc -O2 -static -I"$LINUX_SRC/include/uapi" -I/usr/include/libdrm \
+aarch64-linux-gnu-gcc -O2 -static -D__user= -I"$LINUX_SRC/include/uapi" -I/usr/include/libdrm \
     -o "$WORK_DIR/drmtext" "$REPO_ROOT/avicii-mainline/tools/drmtext.c"
 aarch64-linux-gnu-gcc -O2 -static \
     -o "$WORK_DIR/rebootto" "$REPO_ROOT/avicii-mainline/tools/rebootto.c"
@@ -133,6 +122,21 @@ sudo install -m 755 "$REPO_ROOT/initramfs/init" "$INIT_ROOT/init"
 sudo install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
 
 (cd "$INIT_ROOT" && sudo find . | sudo cpio -o -H newc -R 0:0 | gzip -9) > "$ARTIFACTS_DIR/initramfs.cpio.gz"
+
+# ---------------------------------------------------------------------------
+# 4. Configure and build Kernel + DTB
+# ---------------------------------------------------------------------------
+OUT_DIR="$WORK_DIR/out"
+make O="$OUT_DIR" ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" defconfig
+ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O "$OUT_DIR" "$OUT_DIR/.config" \
+    "$REPO_ROOT"/avicii-mainline/config/avicii*.config \
+    "$REPO_ROOT/config/redfin.config"
+make O="$OUT_DIR" ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" olddefconfig
+make O="$OUT_DIR" ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" -j"$(nproc)" \
+    Image.gz qcom/sm7250-google-redfin.dtb
+
+cp "$OUT_DIR/arch/arm64/boot/Image.gz" "$ARTIFACTS_DIR/Image.gz"
+cp "$OUT_DIR/arch/arm64/boot/dts/qcom/sm7250-google-redfin.dtb" "$ARTIFACTS_DIR/sm7250-google-redfin.dtb"
 
 # ---------------------------------------------------------------------------
 # 5. Pack boot-redfin.img (Android Boot Image Header v2)

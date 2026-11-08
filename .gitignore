@@ -5,4 +5,3 @@ fw_out/
 avicii-mainline/.git
 *.pyc
 __pycache__/
-check_ci.py
