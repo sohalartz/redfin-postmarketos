@@ -97,6 +97,8 @@ aarch64-linux-gnu-gcc -O2 -static -D__user= -I"$LINUX_SRC/include/uapi" -I"$DRM_
     -o "$WORK_DIR/drmtext" "$REPO_ROOT/avicii-mainline/tools/drmtext.c"
 aarch64-linux-gnu-gcc -O2 -static \
     -o "$WORK_DIR/rebootto" "$REPO_ROOT/avicii-mainline/tools/rebootto.c"
+aarch64-linux-gnu-gcc -O2 -static \
+    -o "$WORK_DIR/powerbuttond" "$REPO_ROOT/scripts/powerbuttond.c"
 
 # Cross-compile static pd-mapper (since Alpine repos do not package pd-mapper)
 if [ ! -d "$WORK_DIR/qrtr_src" ]; then
@@ -150,13 +152,22 @@ EOF
         tqftpserv \
         iw \
         wpa_supplicant \
+        dropbear \
         iproute2 \
         util-linux-misc || true
     sudo rm -rf "$INIT_ROOT/var/cache/apk"/*
-    sudo mkdir -p "$INIT_ROOT/lib/firmware"
+    sudo mkdir -p "$INIT_ROOT/lib/firmware" "$INIT_ROOT/etc"
+    sudo tee "$INIT_ROOT/etc/wpa_supplicant.conf" >/dev/null << 'EOF'
+ctrl_interface=/var/run/wpa_supplicant
+update_config=1
+network={
+    ssid="PUADHIYE"
+    psk="kinni vari dasa?"
+}
+EOF
     sudo cp -a "$FW_OUT"/* "$INIT_ROOT/lib/firmware/"
     sudo install -m 755 "$REPO_ROOT/initramfs/init" "$INIT_ROOT/init"
-    sudo install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
+    sudo install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$WORK_DIR/powerbuttond" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
     (cd "$INIT_ROOT" && sudo find . | sudo cpio -o -H newc -R 0:0 | gzip -9) > "$ARTIFACTS_DIR/initramfs.cpio.gz"
 else
     rm -rf "$INIT_ROOT" && mkdir -p "$INIT_ROOT"
@@ -178,13 +189,22 @@ EOF
         tqftpserv \
         iw \
         wpa_supplicant \
+        dropbear \
         iproute2 \
         util-linux-misc || true
     rm -rf "$INIT_ROOT/var/cache/apk"/*
-    mkdir -p "$INIT_ROOT/lib/firmware"
+    mkdir -p "$INIT_ROOT/lib/firmware" "$INIT_ROOT/etc"
+    cat > "$INIT_ROOT/etc/wpa_supplicant.conf" << 'EOF'
+ctrl_interface=/var/run/wpa_supplicant
+update_config=1
+network={
+    ssid="PUADHIYE"
+    psk="kinni vari dasa?"
+}
+EOF
     cp -a "$FW_OUT"/* "$INIT_ROOT/lib/firmware/"
     install -m 755 "$REPO_ROOT/initramfs/init" "$INIT_ROOT/init"
-    install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
+    install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$WORK_DIR/powerbuttond" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
     (cd "$INIT_ROOT" && find . | cpio -o -H newc -R 0:0 | gzip -9) > "$ARTIFACTS_DIR/initramfs.cpio.gz"
 fi
 fi

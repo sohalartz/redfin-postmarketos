@@ -75,6 +75,14 @@ else
 	telnetd -l /bin/sh 2>/dev/null
 fi
 
+# Start dropbear SSH daemon if available
+if command -v dropbear >/dev/null 2>&1; then
+	mkdir -p /etc/dropbear /root
+	[ -e /etc/dropbear/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null
+	dropbear -R -B -p 22 2>/dev/null
+	echo "redfin-init: dropbear SSH daemon started on port 22" > /dev/kmsg
+fi
+
 [ -c /dev/ttyGS0 ] && (while :; do setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done) &
 
 echo "redfin-init: network up, telnet 172.16.42.1" > /dev/kmsg
@@ -169,6 +177,11 @@ setup_firmware_and_wifi() {
 	if [ -d /sys/class/net/wlan0 ]; then
 		ifconfig wlan0 up 2>/dev/null
 		echo "redfin-init: wlan0 is UP" > /dev/kmsg
+		if [ -e /etc/wpa_supplicant.conf ]; then
+			mkdir -p /var/run/wpa_supplicant
+			wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf 2>/dev/null
+			udhcpc -i wlan0 -b -n 2>/dev/null &
+		fi
 	fi
 }
 setup_firmware_and_wifi &
@@ -194,28 +207,34 @@ fi
 # --- OLED panel status display ---
 render_status() {
 	{
-		echo "Google Pixel 5 (redfin)"
+		echo "Google Pixel 5 Home Server"
 		echo "postmarketOS / Linux $(uname -r)"
 		echo "----------------------------------"
 		echo "CPU : $(nproc)x Kryo 475 (SM7250)"
 		FREQ=$(cat /sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq 2>/dev/null)
 		[ -n "$FREQ" ] && echo "      Prime core @ $((FREQ / 1000)) MHz"
-		echo "RAM : $(awk '/MemTotal/{printf "%d MB", $2/1024}' /proc/meminfo)"
+		RAM_TOTAL=$(awk '/MemTotal/{printf "%d MB", $2/1024}' /proc/meminfo)
+		RAM_AVAIL=$(awk '/MemAvailable/{printf "%d MB", $2/1024}' /proc/meminfo)
+		echo "RAM : $RAM_TOTAL ($RAM_AVAIL free)"
 		if [ -e /dev/dri/card0 ]; then
 			echo "GPU : Adreno 620 (/dev/dri/card0)"
 		else
 			echo "GPU : probing..."
 		fi
-		UFS_DEVS=$(ls /dev/sd[a-z] 2>/dev/null | tr '\n' ' ')
-		echo "UFS : ${UFS_DEVS:-probing...}"
 		if [ -d /sys/class/net/wlan0 ]; then
-			W_MAC=$(cat /sys/class/net/wlan0/address 2>/dev/null)
-			echo "WiFi: wlan0 UP ($W_MAC)"
+			W_IP=$(ip -4 addr show dev wlan0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+			if [ -n "$W_IP" ]; then
+				echo "WiFi: PUADHIYE ($W_IP)"
+				echo "SSH : ssh root@$W_IP"
+			else
+				W_MAC=$(cat /sys/class/net/wlan0/address 2>/dev/null)
+				echo "WiFi: connecting... ($W_MAC)"
+			fi
 		else
 			echo "WiFi: initializing MPSS/ath10k..."
 		fi
 		echo "USB : usb0 172.16.42.1 (telnet)"
-		echo "Time: up $(cut -d' ' -f1 /proc/uptime)s"
+		echo "Time: up $(cut -d' ' -f1 /proc/uptime)s (Server Online)"
 	} > /run/status.txt
 }
 
@@ -226,8 +245,12 @@ status_screen() {
 		[ -e "$b/brightness" ] && echo $(( $(cat "$b/max_brightness") / 2 )) > "$b/brightness" 2>/dev/null
 	done
 	DRM_PID=""
-	# Auto-refresh display every 5 seconds
+	# Auto-refresh display every 5 seconds (pauses when screen is turned off via power button)
 	while :; do
+		if [ -e /run/screen_off ]; then
+			sleep 1
+			continue
+		fi
 		render_status
 		OLD_PID="$DRM_PID"
 		drmtext -s 3 /run/status.txt > /run/drmtext.log 2>&1 &
@@ -237,6 +260,7 @@ status_screen() {
 		sleep 4
 	done
 }
+command -v powerbuttond >/dev/null 2>&1 && powerbuttond &
 status_screen &
 
 while :; do sleep 3600; done
