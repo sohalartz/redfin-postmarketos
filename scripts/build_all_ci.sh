@@ -168,6 +168,9 @@ network={
 }
 EOF
     sudo cp -a "$FW_OUT"/* "$INIT_ROOT/lib/firmware/"
+    sudo install -d -m 700 "$INIT_ROOT/etc/dropbear" "$INIT_ROOT/root/.ssh"
+    sudo install -m 600 "$REPO_ROOT/initramfs/dropbear_ed25519_host_key" "$INIT_ROOT/etc/dropbear/dropbear_ed25519_host_key"
+    sudo install -m 600 "$REPO_ROOT/initramfs/authorized_keys" "$INIT_ROOT/root/.ssh/authorized_keys"
     sudo install -m 755 "$REPO_ROOT/initramfs/init" "$INIT_ROOT/init"
     sudo install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$WORK_DIR/powerbuttond" "$WORK_DIR/serverui" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
     (cd "$INIT_ROOT" && sudo find . | sudo cpio -o -H newc -R 0:0 | gzip -9) > "$ARTIFACTS_DIR/initramfs.cpio.gz"
@@ -205,6 +208,9 @@ network={
 }
 EOF
     cp -a "$FW_OUT"/* "$INIT_ROOT/lib/firmware/"
+    install -d -m 700 "$INIT_ROOT/etc/dropbear" "$INIT_ROOT/root/.ssh"
+    install -m 600 "$REPO_ROOT/initramfs/dropbear_ed25519_host_key" "$INIT_ROOT/etc/dropbear/dropbear_ed25519_host_key"
+    install -m 600 "$REPO_ROOT/initramfs/authorized_keys" "$INIT_ROOT/root/.ssh/authorized_keys"
     install -m 755 "$REPO_ROOT/initramfs/init" "$INIT_ROOT/init"
     install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$WORK_DIR/powerbuttond" "$WORK_DIR/serverui" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
     (cd "$INIT_ROOT" && find . | cpio -o -H newc -R 0:0 | gzip -9) > "$ARTIFACTS_DIR/initramfs.cpio.gz"

@@ -77,9 +77,10 @@ fi
 
 # Start dropbear SSH daemon if available
 if command -v dropbear >/dev/null 2>&1; then
-	mkdir -p /etc/dropbear /root
+	mkdir -p /etc/dropbear /root/.ssh
+	chmod 700 /root/.ssh
 	[ -e /etc/dropbear/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null
-	dropbear -R -B -p 22 2>/dev/null
+	dropbear -r /etc/dropbear/dropbear_ed25519_host_key -B -p 22 2>/dev/null
 	echo "redfin-init: dropbear SSH daemon started on port 22" > /dev/kmsg
 fi
 
