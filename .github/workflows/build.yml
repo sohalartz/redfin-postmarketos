@@ -29,6 +29,7 @@ jobs:
           key: redfin-kernel-ccache-${{ github.sha }}
           restore-keys: |
             redfin-kernel-ccache-
+          save-always: true
 
       - name: Build Kernel, DTB, Firmware, Initramfs, and boot-redfin.img
         run: |

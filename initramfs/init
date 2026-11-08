@@ -101,7 +101,7 @@ setup_firmware_and_wifi() {
 	ATH_DIR=/lib/firmware/ath10k/WCN3990/hw1.0
 	mkdir -p "$FW_DIR" "$ATH_DIR"
 
-	for slot in modem_b modem_a; do
+	for slot in modem_a modem_b; do
 		if [ -b "/dev/disk/by-partlabel/$slot" ]; then
 			if mount -t vfat -o ro "/dev/disk/by-partlabel/$slot" /mnt/modem 2>/dev/null; then
 				echo "redfin-init: mounted $slot at /mnt/modem" > /dev/kmsg
@@ -112,9 +112,11 @@ setup_firmware_and_wifi() {
 
 	if [ -d /mnt/modem/image ]; then
 		for f in /mnt/modem/image/*; do
-			[ -e "$f" ] && ln -sf "$f" "$FW_DIR/$(basename "$f")"
+			[ -e "$f" ] || continue
+			base=$(basename "$f")
+			[ -e "$FW_DIR/$base" ] || ln -sf "$f" "$FW_DIR/$base"
 		done
-		[ -e /mnt/modem/image/wlanmdsp.mbn ] && ln -sf /mnt/modem/image/wlanmdsp.mbn "$ATH_DIR/wlanmdsp.mbn"
+		[ -e /mnt/modem/image/wlanmdsp.mbn ] && [ ! -e "$ATH_DIR/wlanmdsp.mbn" ] && ln -sf /mnt/modem/image/wlanmdsp.mbn "$ATH_DIR/wlanmdsp.mbn"
 	fi
 
 	# Start Qualcomm userspace services needed by MPSS and wlan_pd

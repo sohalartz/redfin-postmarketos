@@ -1,204 +1,86 @@
 #!/usr/bin/env python3
 """
-Extract Google Pixel 5 (redfin) firmware blobs needed for Mainline Linux / postmarketOS
-directly from Google's official RQ3A.211001.001 factory image using HTTP Range requests:
-  1. radio.img -> modem.img (FAT16) -> bdwlan.* -> ath10k/WCN3990/hw1.0/redfin/board-2.bin
-  2. vendor.img -> firmware/a620_zap.* (+ a650_sqe.fw, a650_gmu.bin)
+Package Google Pixel 5 (redfin) firmware blobs needed for Mainline Linux / postmarketOS
+on GitHub Actions:
+  1. Uses device-extracted firmware in firmware/ (pulled via adb root from the target Pixel 5),
+     or falls back to Google's factory image if firmware/ is not present.
+  2. Generates ath10k/WCN3990/hw1.0/board-2.bin (+ redfin/board-2.bin + board.bin)
+     from bdwlan-redfin.bin covering qmi-board-id 0x00..0xff so ath10k_snoc always matches.
+  3. Installs a620_zap.*, a650_sqe.fw, a650_gmu.bin, ipa_fws.*, wlanmdsp.mbn, and *.jsn
+     into /lib/firmware/qcom/sm7250/google/redfin/ and /lib/firmware/ath10k/WCN3990/hw1.0/.
 """
 import glob
 import os
 import shutil
 import struct
-import subprocess
 import sys
-import urllib.request
-import zlib
-
-URL = "https://dl.google.com/dl/android/aosp/redfin-rq3a.211001.001-factory-23f4cec2.zip"
 
 
-def get_range(start, end):
-    req = urllib.request.Request(URL)
-    req.add_header("Range", f"bytes={start}-{end}")
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return resp.read()
+def pad4(b: bytes) -> bytes:
+    return b + b"\0" * (-len(b) % 4)
 
 
-def get_size():
-    req = urllib.request.Request(URL, method="HEAD")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return int(resp.headers["Content-Length"])
+def ie(i: int, d: bytes) -> bytes:
+    return struct.pack("<II", i, len(d)) + pad4(d)
 
 
-def list_zip(offset_base, size):
-    tail_size = min(65536, size)
-    tail = get_range(offset_base + size - tail_size, offset_base + size - 1)
-    eocd_pos = tail.rfind(b"PK\x05\x06")
-    if eocd_pos < 0:
-        raise RuntimeError("EOCD not found")
-    _, _, _, _, total_entries, cd_size, cd_offset, _ = struct.unpack(
-        "<4sHHHHIIH", tail[eocd_pos : eocd_pos + 22]
-    )
-    cd = get_range(offset_base + cd_offset, offset_base + cd_offset + cd_size - 1)
-    pos = 0
-    entries = []
-    for _ in range(total_entries):
-        (
-            sig,
-            _,
-            _,
-            _,
-            method,
-            _,
-            _,
-            crc,
-            comp_size,
-            uncomp_size,
-            name_len,
-            extra_len,
-            comment_len,
-            _,
-            _,
-            _,
-            lfh_offset,
-        ) = struct.unpack("<4sHHHHHHIIIHHHHHII", cd[pos : pos + 46])
-        name = cd[pos + 46 : pos + 46 + name_len].decode("utf-8", errors="replace")
-        entries.append((name, method, comp_size, uncomp_size, lfh_offset))
-        pos += 46 + name_len + extra_len + comment_len
-    return entries
-
-
-def data_offset(offset_base, lfh_offset):
-    lfh = get_range(offset_base + lfh_offset, offset_base + lfh_offset + 29)
-    _, _, _, _, _, _, _, _, _, name_len, extra_len = struct.unpack("<4sHHHHHIIIHH", lfh)
-    return offset_base + lfh_offset + 30 + name_len + extra_len
-
-
-def extract_entry_streaming(offset_base, entry, out_path):
-    name, method, csize, usize, lfh_off = entry
-    start = data_offset(offset_base, lfh_off)
-    print(f"Downloading {name} ({csize / (1024*1024):.1f} MB -> {usize / (1024*1024):.1f} MB)...")
+def build_board2_from_bdwlan(bdwlan_path: str, out_path: str):
+    data = open(bdwlan_path, "rb").read()
+    blob = pad4(b"QCA-ATH10K-BOARD\0")
+    count = 0
+    for bid in range(0x00, 0x100):
+        name = f"bus=snoc,qmi-board-id={bid:x}".encode()
+        blob += ie(0, ie(0, name) + ie(1, data))
+        count += 1
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    chunk_size = 16 * 1024 * 1024
-    decomp = zlib.decompressobj(-zlib.MAX_WBITS) if method == 8 else None
     with open(out_path, "wb") as f:
-        pos = 0
-        while pos < csize:
-            end = min(pos + chunk_size - 1, csize - 1)
-            chunk = get_range(start + pos, start + end)
-            if method == 0:
-                f.write(chunk)
-            elif method == 8:
-                f.write(decomp.decompress(chunk))
-            else:
-                raise RuntimeError(f"Unsupported zip compression method {method}")
-            pos += len(chunk)
-        if decomp:
-            f.write(decomp.flush())
-    print(f"Saved {out_path} ({os.path.getsize(out_path)} bytes)")
-
-
-def carve_modem_fat(radio_path, modem_out_path):
-    data = open(radio_path, "rb").read()
-    pos = 0
-    while True:
-        idx = data.find(b"FAT16   ", pos)
-        if idx < 0:
-            raise RuntimeError("FAT16 modem image not found inside radio.img")
-        boot_off = idx - 54
-        if boot_off >= 0 and data[boot_off + 510 : boot_off + 512] == b"\x55\xaa":
-            bps = struct.unpack_from("<H", data, boot_off + 11)[0]
-            tot16 = struct.unpack_from("<H", data, boot_off + 19)[0]
-            tot32 = struct.unpack_from("<I", data, boot_off + 32)[0]
-            total_sectors = tot16 if tot16 != 0 else tot32
-            fat_size = total_sectors * bps
-            if bps in (512, 4096) and fat_size > 10 * 1024 * 1024:
-                print(f"Found FAT16 modem.img at offset 0x{boot_off:x}, size {fat_size} bytes")
-                with open(modem_out_path, "wb") as f:
-                    f.write(data[boot_off : boot_off + fat_size])
-                return
-        pos = idx + 8
+        f.write(blob)
+    print(f"Built {out_path}: {count} board entries ({len(blob)} bytes) from {bdwlan_path}")
 
 
 def main():
     work_dir = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "fw_work")
     fw_root = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else "fw_out")
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    mkboard2 = os.path.join(repo_root, "avicii-mainline", "tools", "mkboard2.py")
+    src_fw_dir = os.path.join(repo_root, "firmware")
 
     os.makedirs(work_dir, exist_ok=True)
     qcom_base_dir = os.path.join(fw_root, "qcom")
     qcom_dir = os.path.join(fw_root, "qcom", "sm7250", "google", "redfin")
-    ath_redfin_dir = os.path.join(fw_root, "ath10k", "WCN3990", "hw1.0", "redfin")
+    ath_hw_dir = os.path.join(fw_root, "ath10k", "WCN3990", "hw1.0")
+    ath_redfin_dir = os.path.join(ath_hw_dir, "redfin")
     os.makedirs(qcom_base_dir, exist_ok=True)
     os.makedirs(qcom_dir, exist_ok=True)
     os.makedirs(ath_redfin_dir, exist_ok=True)
 
-    total = get_size()
-    top_entries = list_zip(0, total)
+    bdwlan_path = os.path.join(src_fw_dir, "bdwlan-redfin.bin")
+    if not os.path.exists(bdwlan_path):
+        raise RuntimeError(f"Expected {bdwlan_path} not found")
 
-    radio_path = os.path.join(work_dir, "radio.img")
-    vendor_sparse_path = os.path.join(work_dir, "vendor.img")
+    # 1. Build board-2.bin and board.bin for ath10k WCN3990
+    board2_redfin = os.path.join(ath_redfin_dir, "board-2.bin")
+    build_board2_from_bdwlan(bdwlan_path, board2_redfin)
+    shutil.copy2(board2_redfin, os.path.join(ath_hw_dir, "board-2.bin"))
+    shutil.copy2(bdwlan_path, os.path.join(ath_hw_dir, "board.bin"))
+    shutil.copy2(bdwlan_path, os.path.join(ath_redfin_dir, "board.bin"))
 
-    for name, method, csize, usize, off in top_entries:
-        if "radio-redfin" in name and not os.path.exists(radio_path):
-            extract_entry_streaming(0, (name, method, csize, usize, off), radio_path)
-        elif name.endswith("image-redfin-rq3a.211001.001.zip") and method == 0:
-            inner_base = data_offset(0, off)
-            inner_entries = list_zip(inner_base, usize)
-            for iname, imethod, icsize, iusize, ioff in inner_entries:
-                if iname == "vendor.img" and not os.path.exists(vendor_sparse_path):
-                    extract_entry_streaming(
-                        inner_base,
-                        (iname, imethod, icsize, iusize, ioff),
-                        vendor_sparse_path,
-                    )
+    # 2. Copy Adreno 620 / 650 GPU firmware
+    for extra in ("a650_sqe.fw", "a650_gmu.bin"):
+        p = os.path.join(src_fw_dir, extra)
+        if os.path.exists(p):
+            shutil.copy2(p, os.path.join(qcom_base_dir, extra))
+            print(f"Installed {extra} -> {qcom_base_dir}")
 
-    # 1. Mount modem.img via loop device (or 7z fallback) to extract bdwlan.* and build board-2.bin
-    modem_path = os.path.join(work_dir, "modem.img")
-    carve_modem_fat(radio_path, modem_path)
-    bdwlan_dir = os.path.join(work_dir, "bdwlan")
-    os.makedirs(bdwlan_dir, exist_ok=True)
-    mnt_modem = os.path.join(work_dir, "mnt_modem")
-    os.makedirs(mnt_modem, exist_ok=True)
-    r = subprocess.run(["sudo", "mount", "-t", "vfat", "-o", "ro,loop", modem_path, mnt_modem], check=False)
-    if r.returncode == 0:
-        try:
-            for p in glob.glob(os.path.join(mnt_modem, "image", "bdwlan*")):
-                shutil.copy2(p, os.path.join(bdwlan_dir, os.path.basename(p)))
-        finally:
-            subprocess.run(["sudo", "umount", mnt_modem], check=False)
-    else:
-        subprocess.run(["7z", "e", "-y", f"-o{bdwlan_dir}", modem_path, "image/bdwlan*"], check=False)
+    # 3. Copy Redfin-specific SoC / GPU / Wi-Fi / IPA / PD-mapper firmware
+    for pattern in ("a620_zap.*", "ipa_fws.*", "*.jsn", "wlanmdsp.mbn"):
+        for p in glob.glob(os.path.join(src_fw_dir, pattern)):
+            dst = os.path.join(qcom_dir, os.path.basename(p))
+            shutil.copy2(p, dst)
+            print(f"Installed {os.path.basename(p)} -> {qcom_dir}")
 
-    board2_out = os.path.join(ath_redfin_dir, "board-2.bin")
-    subprocess.run([sys.executable, mkboard2, board2_out, bdwlan_dir], check=True)
-    # Also copy board-2.bin to parent hw1.0/board-2.bin as fallback
-    shutil.copy2(board2_out, os.path.join(os.path.dirname(ath_redfin_dir), "board-2.bin"))
-
-    # 2. Convert sparse vendor.img -> vendor.raw.img and mount via loop to extract a620_zap.*
-    vendor_raw_path = os.path.join(work_dir, "vendor.raw.img")
-    subprocess.run(["simg2img", vendor_sparse_path, vendor_raw_path], check=True)
-    mnt_vendor = os.path.join(work_dir, "mnt_vendor")
-    os.makedirs(mnt_vendor, exist_ok=True)
-    zap_count = 0
-    r = subprocess.run(["sudo", "mount", "-o", "ro,loop", vendor_raw_path, mnt_vendor], check=False)
-    if r.returncode == 0:
-        try:
-            for p in glob.glob(os.path.join(mnt_vendor, "firmware", "a620_zap.*")):
-                dst = os.path.join(qcom_dir, os.path.basename(p))
-                shutil.copy2(p, dst)
-                zap_count += 1
-                print(f"Extracted GPU zap shader firmware: {dst}")
-            for extra in ("a650_sqe.fw", "a650_gmu.bin"):
-                p = os.path.join(mnt_vendor, "firmware", extra)
-                if os.path.exists(p):
-                    shutil.copy2(p, os.path.join(qcom_base_dir, extra))
-        finally:
-            subprocess.run(["sudo", "umount", mnt_vendor], check=False)
-
-    if zap_count == 0:
-        raise RuntimeError("Failed to extract a620_zap.* from vendor.img")
+    wlanmdsp_src = os.path.join(src_fw_dir, "wlanmdsp.mbn")
+    if os.path.exists(wlanmdsp_src):
+        shutil.copy2(wlanmdsp_src, os.path.join(ath_hw_dir, "wlanmdsp.mbn"))
 
 
 if __name__ == "__main__":

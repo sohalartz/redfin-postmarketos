@@ -70,47 +70,6 @@ if ! grep -q "panel-samsung-s6e3hc2.o" drivers/gpu/drm/panel/Makefile; then
     echo 'obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6E3HC2) += panel-samsung-s6e3hc2.o' >> drivers/gpu/drm/panel/Makefile
 fi
 
-# Re-apply QRTR NS HELLO re-announcement workaround so WCN3990 wlan_pd reliably discovers rmtfs/pd-mapper
-python3 - <<'PY'
-p = "net/qrtr/ns.c"
-txt = open(p).read()
-if "reannounce_work" not in txt:
-    txt = txt.replace(
-        "struct work_struct work;",
-        "struct work_struct work;\n\tstruct delayed_work reannounce_work;"
-    )
-    reannounce_fn = """
-static void qrtr_ns_reannounce_work(struct work_struct *work)
-{
-	struct qrtr_node *node;
-	struct qrtr_server *srv;
-	unsigned long index;
-
-	node = node_get(qrtr_ns.local_node);
-	if (!node)
-		return;
-
-	xa_for_each(&node->servers, index, srv)
-		server_announce(node, srv);
-}
-"""
-    txt = txt.replace("static int ctrl_cmd_hello(", reannounce_fn + "\nstatic int ctrl_cmd_hello(")
-    txt = txt.replace(
-        "\treturn 0;\n}\n\nstatic int ctrl_cmd_bye(",
-        "\tschedule_delayed_work(&qrtr_ns.reannounce_work, msecs_to_jiffies(1500));\n\treturn 0;\n}\n\nstatic int ctrl_cmd_bye("
-    )
-    txt = txt.replace(
-        "INIT_WORK(&qrtr_ns.work, qrtr_ns_worker);",
-        "INIT_WORK(&qrtr_ns.work, qrtr_ns_worker);\n\tINIT_DELAYED_WORK(&qrtr_ns.reannounce_work, qrtr_ns_reannounce_work);"
-    )
-    txt = txt.replace(
-        "cancel_work_sync(&qrtr_ns.work);",
-        "cancel_work_sync(&qrtr_ns.work);\n\tcancel_delayed_work_sync(&qrtr_ns.reannounce_work);"
-    )
-    open(p, "w").write(txt)
-    print("Patched net/qrtr/ns.c with delayed local server re-announcement")
-PY
-
 # ---------------------------------------------------------------------------
 # 3. Configure and build Kernel + DTB
 # ---------------------------------------------------------------------------
