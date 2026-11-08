@@ -5,13 +5,13 @@ This repository (`https://github.com/sohalartz/redfin-postmarketos`) contains th
 ---
 
 ## 1. User Constraints & Rules
-1. **ALL Linux compilation, firmware packaging, and initramfs/boot.img creation MUST happen on GitHub Actions** (`.github/workflows/build.yml`). Do **NOT** use local WSL2.
+1. **Local Build Flow:** The user moved to a powerful local machine (`linux`), so all kernel, initramfs, and `boot-redfin.img` builds are now run **locally** using `./scripts/build_all_ci.sh` (or `REBUILD_INITRAMFS=1 ./scripts/build_all_ci.sh`).
 2. **Target Working Subsystems:**
-   - **CPU:** 8x Kryo 475 (`SM7250`) + `qcom-cpufreq-hw`
-   - **GPU:** Adreno 620 (`/dev/dri/card0` + `a620_zap.mdt`)
-   - **Display:** Samsung `S6E3HC2` `1080x2340@90Hz` DSC 1.1 command-mode AMOLED panel (`DSI-1`)
-   - **Storage:** UFS 2.1 internal storage (`/dev/sda`..`/dev/sdf`, `/dev/disk/by-partlabel/*`)
-   - **Wi-Fi:** WCN3990 (`ath10k_snoc` + `pd-mapper` + `rmtfs -r -P -s` + `mpss` remoteproc -> `wlan0`)
+   - **CPU:** 8x Kryo 475 (`SM7250`) + `qcom-cpufreq-hw` (VERIFIED WORKING)
+   - **Display:** Samsung `S6E3HC2` `1080x2340@60Hz` DSC 1.1 command-mode AMOLED panel (`card0-DSI-1` + `drmtext` rendering live status screen with 5s auto-refresh) (VERIFIED WORKING)
+   - **Storage:** UFS 2.1 internal storage (`/dev/sda`..`/dev/sdf`, all 73 partitions in `/dev/disk/by-partlabel/*`) (VERIFIED WORKING)
+   - **Wi-Fi:** WCN3990 (`ath10k_snoc` + `mpss` remoteproc + `tqftpserv` + `rmtfs` -> `wlan0` scanning networks) (VERIFIED WORKING)
+   - **GPU:** Adreno 620 (`/dev/dri/card0` + `a650_sqe.fw` updated to `0x112` + `a620_zap.mbn`) (VERIFIED WORKING)
 
 ---
 

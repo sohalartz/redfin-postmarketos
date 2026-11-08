@@ -92,13 +92,10 @@ static void s6e3hc2_send_on(struct s6e3hc2 *ctx,
 	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xeb, 0x01);
 	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xb0, 0x07, 0xb9);
 	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xb9, 0x11, 0x03);
-	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x00, 0x01);
+	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x97, 0x02, 0x60);
 	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xf0, 0xa5, 0xa5);
 	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xf1, 0xa5, 0xa5);
 	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfc, 0xa5, 0xa5);
-
-	mipi_dsi_dcs_set_column_address_multi(dsi_ctx, 0, S6E3HC2_WIDTH - 1);
-	mipi_dsi_dcs_set_page_address_multi(dsi_ctx, 0, S6E3HC2_HEIGHT - 1);
 
 	mipi_dsi_dcs_set_display_on_multi(dsi_ctx);
 }
@@ -348,7 +345,7 @@ static int s6e3hc2_probe(struct mipi_dsi_device *dsi)
 		ctx->supplies[i] = reg;
 	}
 
-	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
 				     "Failed to get reset-gpios\n");
@@ -364,6 +361,7 @@ static int s6e3hc2_probe(struct mipi_dsi_device *dsi)
 	/*
 	 * DSC 1.1, 8 bpc, 8 bpp (4 fractional bits), block prediction,
 	 * two 540x65 slices per line, 1 slice per packet.
+	 * The MSM DSI host derives the remaining RC parameters during attach.
 	 */
 	ctx->dsc.dsc_version_major = 1;
 	ctx->dsc.dsc_version_minor = 1;
@@ -375,13 +373,6 @@ static int s6e3hc2_probe(struct mipi_dsi_device *dsi)
 	ctx->dsc.bits_per_component = 8;
 	ctx->dsc.bits_per_pixel = 8 << 4;
 	ctx->dsc.block_pred_enable = true;
-	ctx->dsc.convert_rgb = true;
-	ctx->dsc.vbr_enable = false;
-
-	ret = drm_dsc_compute_rc_parameters(&ctx->dsc);
-	if (ret)
-		return dev_err_probe(dev, ret, "Failed to compute DSC RC parameters\n");
-
 	dsi->dsc = &ctx->dsc;
 
 	ctx->panel.prepare_prev_first = true;

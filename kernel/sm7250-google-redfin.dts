@@ -363,7 +363,7 @@
 	panel_reset_default: panel-reset-default-state {
 		pins = "gpio5";
 		function = "normal";
-		power-source = <0>;
+		power-source = <1>;
 		bias-disable;
 		output-high;
 		qcom,drive-strength = <PMIC_GPIO_STRENGTH_MED>;
