@@ -99,6 +99,8 @@ aarch64-linux-gnu-gcc -O2 -static \
     -o "$WORK_DIR/rebootto" "$REPO_ROOT/avicii-mainline/tools/rebootto.c"
 aarch64-linux-gnu-gcc -O2 -static \
     -o "$WORK_DIR/powerbuttond" "$REPO_ROOT/scripts/powerbuttond.c"
+aarch64-linux-gnu-gcc -O2 -static -D__user= -I"$LINUX_SRC/include/uapi" -I"$DRM_INC" -I"$REPO_ROOT/avicii-mainline/tools" \
+    -o "$WORK_DIR/serverui" "$REPO_ROOT/scripts/serverui.c"
 
 # Cross-compile static pd-mapper (since Alpine repos do not package pd-mapper)
 if [ ! -d "$WORK_DIR/qrtr_src" ]; then
@@ -167,7 +169,7 @@ network={
 EOF
     sudo cp -a "$FW_OUT"/* "$INIT_ROOT/lib/firmware/"
     sudo install -m 755 "$REPO_ROOT/initramfs/init" "$INIT_ROOT/init"
-    sudo install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$WORK_DIR/powerbuttond" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
+    sudo install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$WORK_DIR/powerbuttond" "$WORK_DIR/serverui" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
     (cd "$INIT_ROOT" && sudo find . | sudo cpio -o -H newc -R 0:0 | gzip -9) > "$ARTIFACTS_DIR/initramfs.cpio.gz"
 else
     rm -rf "$INIT_ROOT" && mkdir -p "$INIT_ROOT"
@@ -204,7 +206,7 @@ network={
 EOF
     cp -a "$FW_OUT"/* "$INIT_ROOT/lib/firmware/"
     install -m 755 "$REPO_ROOT/initramfs/init" "$INIT_ROOT/init"
-    install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$WORK_DIR/powerbuttond" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
+    install -m 755 "$WORK_DIR/drmtext" "$WORK_DIR/rebootto" "$WORK_DIR/pd-mapper" "$WORK_DIR/powerbuttond" "$WORK_DIR/serverui" "$REPO_ROOT/avicii-mainline/initramfs/flashpart" "$INIT_ROOT/usr/bin/"
     (cd "$INIT_ROOT" && find . | cpio -o -H newc -R 0:0 | gzip -9) > "$ARTIFACTS_DIR/initramfs.cpio.gz"
 fi
 fi

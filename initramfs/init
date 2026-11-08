@@ -244,23 +244,14 @@ status_screen() {
 	for b in /sys/class/backlight/*; do
 		[ -e "$b/brightness" ] && echo $(( $(cat "$b/max_brightness") / 2 )) > "$b/brightness" 2>/dev/null
 	done
-	DRM_PID=""
-	# Auto-refresh display every 5 seconds (pauses when screen is turned off via power button)
-	while :; do
-		if [ -e /run/screen_off ]; then
-			sleep 1
-			continue
-		fi
+	if command -v serverui >/dev/null 2>&1; then
+		echo "redfin-init: launching interactive serverui" > /dev/kmsg
+		exec serverui
+	else
 		render_status
-		OLD_PID="$DRM_PID"
-		drmtext -s 3 /run/status.txt > /run/drmtext.log 2>&1 &
-		DRM_PID=$!
-		sleep 1
-		[ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null
-		sleep 4
-	done
+		drmtext -s 3 /run/status.txt &
+	fi
 }
-command -v powerbuttond >/dev/null 2>&1 && powerbuttond &
 status_screen &
 
 while :; do sleep 3600; done
