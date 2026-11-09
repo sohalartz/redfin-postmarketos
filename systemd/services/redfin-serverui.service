@@ -1,0 +1,14 @@
+[Unit]
+Description=Pixel 5 Interactive Home Server OLED UI
+After=multi-user.target redfin-wifi.service
+Wants=redfin-wifi.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c "for i in $(seq 1 15); do [ -e /dev/dri/card0 ] && break; sleep 1; done; for b in /sys/class/backlight/*/brightness; do [ -e \"$b\" ] && echo 511 > \"$b\" 2>/dev/null; done; true"
+ExecStart=/usr/bin/serverui
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

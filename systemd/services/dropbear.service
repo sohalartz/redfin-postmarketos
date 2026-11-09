@@ -1,0 +1,14 @@
+[Unit]
+Description=Dropbear SSH Daemon
+After=network.target redfin-usb-gadget.service
+Wants=redfin-usb-gadget.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /var/run/dropbear /root/.ssh
+ExecStart=/usr/sbin/dropbear -F -E -p 22 -r /etc/dropbear/dropbear_ed25519_host_key
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

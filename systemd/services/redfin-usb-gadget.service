@@ -1,0 +1,11 @@
+[Unit]
+Description=Google Pixel 5 USB Gadget (NCM Ethernet & ACM Serial)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/redfin-usb-gadget.sh
+
+[Install]
+WantedBy=basic.target

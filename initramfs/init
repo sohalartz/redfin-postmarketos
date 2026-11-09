@@ -199,9 +199,9 @@ if ! grep -qw redfin.boot=ramfs /proc/cmdline; then
 	mkdir -p /newroot
 	if [ -n "$rootdev" ] && mount -o noatime "$rootdev" /newroot; then
 		init_bin=""
-		[ -x /newroot/sbin/init_ubuntu ] && init_bin=/sbin/init_ubuntu
-		[ -z "$init_bin" ] && [ -x /newroot/sbin/init ] && init_bin=/sbin/init
+		[ -x /newroot/sbin/init ] && init_bin=/sbin/init
 		[ -z "$init_bin" ] && [ -x /newroot/lib/systemd/systemd ] && init_bin=/lib/systemd/systemd
+		[ -z "$init_bin" ] && [ -x /newroot/sbin/init_ubuntu ] && init_bin=/sbin/init_ubuntu
 
 		if [ -n "$init_bin" ]; then
 			echo "redfin-init: switching root to persistent Ubuntu rootfs on $rootdev ($init_bin)" > /dev/kmsg

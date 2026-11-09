@@ -1,0 +1,12 @@
+[Unit]
+Description=Qualcomm SM7250 Modem and WLAN Setup
+After=basic.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/redfin-modem-setup.sh
+
+[Install]
+WantedBy=multi-user.target

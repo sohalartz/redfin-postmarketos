@@ -1,0 +1,14 @@
+[Unit]
+Description=Pixel 5 USB Serial ACM Shell
+After=redfin-usb-gadget.service
+Wants=redfin-usb-gadget.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c "for i in $(seq 1 10); do [ -c /dev/ttyGS0 ] && break; sleep 1; done; true"
+ExecStart=-/usr/sbin/agetty --keep-baud 115200 ttyGS0 vt220 --noclear -a root
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

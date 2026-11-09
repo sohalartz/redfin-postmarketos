@@ -1,0 +1,12 @@
+[Unit]
+Description=Google Pixel 5 Wi-Fi Connection
+After=network.target redfin-modem.service
+Wants=redfin-modem.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/redfin-wifi.sh
+
+[Install]
+WantedBy=multi-user.target
