@@ -187,22 +187,34 @@ setup_firmware_and_wifi() {
 }
 setup_firmware_and_wifi &
 
-# --- Optional switch_root to postmarketOS on UFS if requested ---
-if grep -qw redfin.boot=pmos /proc/cmdline; then
+# --- Switch_root to persistent Ubuntu rootfs on UFS (/dev/sda18) ---
+if ! grep -qw redfin.boot=ramfs /proc/cmdline; then
 	i=0
 	while [ $i -lt 10 ]; do
-		rootdev=$(findfs LABEL=pmos_root 2>/dev/null || findfs LABEL=redfinroot 2>/dev/null) && [ -n "$rootdev" ] && break
+		rootdev=$(findfs LABEL=ubuntu_root 2>/dev/null || findfs LABEL=pmos_root 2>/dev/null) && [ -n "$rootdev" ] && break
 		sleep 1; i=$((i + 1))
 	done
 	mkdir -p /newroot
-	if [ -n "$rootdev" ] && mount -o noatime "$rootdev" /newroot && [ -x /newroot/sbin/init ]; then
-		echo "redfin-init: switching root to postmarketOS on $rootdev" > /dev/kmsg
-		killall watchdog 2>/dev/null
-		umount /sys/fs/pstore /sys/kernel/config 2>/dev/null
-		for m in dev proc sys run; do mount -o move /$m /newroot/$m; done
-		exec switch_root /newroot /sbin/init
+	if [ -n "$rootdev" ] && mount -o noatime "$rootdev" /newroot; then
+		init_bin=""
+		[ -x /newroot/sbin/init_ubuntu ] && init_bin=/sbin/init_ubuntu
+		[ -z "$init_bin" ] && [ -x /newroot/sbin/init ] && init_bin=/sbin/init
+		[ -z "$init_bin" ] && [ -x /newroot/lib/systemd/systemd ] && init_bin=/lib/systemd/systemd
+
+		if [ -n "$init_bin" ]; then
+			echo "redfin-init: switching root to persistent Ubuntu rootfs on $rootdev ($init_bin)" > /dev/kmsg
+			storagedev=$(findfs LABEL=storage 2>/dev/null)
+			if [ -n "$storagedev" ]; then
+				mkdir -p /newroot/mnt
+				mount -o noatime "$storagedev" /newroot/mnt 2>/dev/null && echo "redfin-init: mounted 111.7GB storage at /mnt" > /dev/kmsg
+			fi
+			killall watchdog 2>/dev/null
+			umount /sys/fs/pstore /sys/kernel/config 2>/dev/null
+			for m in dev proc sys run; do mount -o move /$m /newroot/$m; done
+			exec switch_root /newroot "$init_bin"
+		fi
+		umount /newroot 2>/dev/null
 	fi
-	umount /newroot 2>/dev/null
 fi
 
 # --- OLED panel status display ---

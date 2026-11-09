@@ -699,7 +699,9 @@ int main(int argc, char **argv) {
                     if (now_ms - last_btn_ms < 200) continue;
                     last_btn_ms = now_ms;
                     last_activity_ms = now_ms;
-                    if (cur_state != STATE_SCREEN_OFF && num_buttons > 0) {
+                    if (cur_state == STATE_SCREEN_OFF) {
+                        set_display_blank(0);
+                    } else if (num_buttons > 0) {
                         focus_idx = (focus_idx + 1) % num_buttons;
                         render_current_ui();
                     }
@@ -714,7 +716,9 @@ int main(int argc, char **argv) {
                     if (now_ms - last_btn_ms < 200) continue;
                     last_btn_ms = now_ms;
                     last_activity_ms = now_ms;
-                    if (cur_state != STATE_SCREEN_OFF && num_buttons > 0) {
+                    if (cur_state == STATE_SCREEN_OFF) {
+                        set_display_blank(0);
+                    } else if (num_buttons > 0) {
                         focus_idx = (focus_idx + num_buttons - 1) % num_buttons;
                         render_current_ui();
                     }
@@ -731,7 +735,9 @@ int main(int argc, char **argv) {
                     if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y) touch_y = ev.value;
                 } else if (ev.type == EV_KEY && (ev.code == BTN_TOUCH || ev.code == BTN_LEFT) && ev.value == 0) {
                     // Finger release / Tap detected
-                    if (cur_state != STATE_SCREEN_OFF) {
+                    if (cur_state == STATE_SCREEN_OFF) {
+                        set_display_blank(0);
+                    } else {
                         for (int b = 0; b < num_buttons; b++) {
                             if (touch_x >= buttons[b].x0 && touch_x <= buttons[b].x0 + buttons[b].w &&
                                 touch_y >= buttons[b].y0 && touch_y <= buttons[b].y0 + buttons[b].h) {
