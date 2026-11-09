@@ -100,16 +100,28 @@ for deb in os.listdir(DEBS_DIR):
         deb_path = os.path.join(DEBS_DIR, deb)
         subprocess.run(["dpkg", "-x", deb_path, ROOTFS], check=True)
 
+# Fix usr-merge: ensure bin, sbin, lib are symlinks to usr/*
+print("Consolidating usr-merge symlinks (bin, sbin, lib)...")
+for d in ['bin', 'sbin', 'lib']:
+    src = os.path.join(ROOTFS, d)
+    dst = os.path.join(ROOTFS, 'usr', d)
+    if os.path.exists(src) and not os.path.islink(src):
+        os.makedirs(dst, exist_ok=True)
+        for item in os.listdir(src):
+            s = os.path.join(src, item)
+            t = os.path.join(dst, item)
+            if not os.path.exists(t):
+                shutil.move(s, t)
+        shutil.rmtree(src)
+        os.symlink(f'usr/{d}', src)
+
+# Ensure /bin/sh points to dash or bash
+sh_link = os.path.join(ROOTFS, "usr/bin/sh")
+if not os.path.exists(sh_link):
+    os.symlink("dash", sh_link)
+
 # Dynamic Linker & Libraries Configuration
 print("Configuring dynamic linker and ldconfig...")
-os.makedirs(os.path.join(ROOTFS, "lib"), exist_ok=True)
-ld_link = os.path.join(ROOTFS, "lib/ld-linux-aarch64.so.1")
-if not os.path.exists(ld_link):
-    os.symlink("/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1", ld_link)
-lib_arch_link = os.path.join(ROOTFS, "lib/aarch64-linux-gnu")
-if not os.path.exists(lib_arch_link):
-    os.symlink("/usr/lib/aarch64-linux-gnu", lib_arch_link)
-
 proot_bin = "/home/prabh/.local/root_pkgs/sysroot/usr/bin/proot"
 qemu_bin = "/home/prabh/.local/root_pkgs/sysroot/usr/bin/qemu-aarch64-static"
 subprocess.run([proot_bin, "-0", "-r", ROOTFS, "-q", qemu_bin, "/usr/sbin/ldconfig.real"], check=True)
@@ -135,6 +147,24 @@ for link in ["udhcpd", "udhcpc", "telnetd", "killall"]:
     if not os.path.exists(target):
         os.symlink(busybox_target, target)
 
+# UDHCPC default script
+os.makedirs(os.path.join(ROOTFS, "usr/share/udhcpc"), exist_ok=True)
+with open(os.path.join(ROOTFS, "usr/share/udhcpc/default.script"), "w") as f:
+    f.write('''#!/bin/sh
+[ -z "$1" ] && exit 1
+case "$1" in
+    deconfig)
+        ip addr flush dev $interface 2>/dev/null
+        ;;
+    renew|bound)
+        ip addr add ${ip}/${mask} dev $interface 2>/dev/null
+        [ -n "$router" ] && ip route add default via ${router%% *} dev $interface 2>/dev/null
+        [ -n "$dns" ] && echo "nameserver ${dns%% *}" > /etc/resolv.conf
+        ;;
+esac
+''')
+os.chmod(os.path.join(ROOTFS, "usr/share/udhcpc/default.script"), 0o755)
+
 # Wi-Fi config
 os.makedirs(os.path.join(ROOTFS, "etc/wpa_supplicant"), exist_ok=True)
 with open(os.path.join(ROOTFS, "etc/wpa_supplicant.conf"), "w") as f:
@@ -157,178 +187,13 @@ shutil.copy2(os.path.join(REPO_ROOT, "initramfs/authorized_keys"),
              os.path.join(ROOTFS, "root/.ssh/authorized_keys"))
 os.chmod(os.path.join(ROOTFS, "root/.ssh/authorized_keys"), 0o600)
 
-# 6. Install /init script
-init_script = """#!/bin/sh
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-mount -t proc none /proc
-mount -t sysfs none /sys
-mount -t devtmpfs none /dev
-mkdir -p /dev/pts /dev/shm /run /tmp
-mount -t devpts devpts /dev/pts
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /tmp
-
-echo "=============================================" > /dev/kmsg
-echo "Google Pixel 5 - Ubuntu 24.04 LTS (Mainline)" > /dev/kmsg
-echo "=============================================" > /dev/kmsg
-
-# --- USB Gadget Network (CDC ECM + RNDIS for telnet 172.16.42.1) ---
-setup_usb() {
-    G=/sys/kernel/config/usb_gadget/g1
-    if [ -d /sys/kernel/config ] && [ ! -d $G ]; then
-        mkdir -p $G
-        echo 0x1d6b > $G/idVendor
-        echo 0x0104 > $G/idProduct
-        mkdir -p $G/strings/0x409
-        echo "15171FDD40000K" > $G/strings/0x409/serialnumber
-        echo "Google" > $G/strings/0x409/manufacturer
-        echo "Pixel 5 Ubuntu Server" > $G/strings/0x409/product
-        mkdir -p $G/configs/c.1/strings/0x409
-        echo "CDC ECM + RNDIS" > $G/configs/c.1/strings/0x409/configuration
-        mkdir -p $G/functions/ecm.usb0
-        ln -sf $G/functions/ecm.usb0 $G/configs/c.1/
-        mkdir -p $G/functions/rndis.usb0
-        ln -sf $G/functions/rndis.usb0 $G/configs/c.1/
-        UDC=$(ls /sys/class/udc 2>/dev/null | head -n 1)
-        [ -n "$UDC" ] && echo "$UDC" > $G/UDC
-    fi
-    ifconfig lo 127.0.0.1 up
-    i=0
-    while [ $i -lt 10 ] && ! ifconfig usb0 >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
-    ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up 2>/dev/null
-
-    cat > /etc/udhcpd.conf <<EOF
-start 172.16.42.2
-end 172.16.42.2
-interface usb0
-option subnet 255.255.255.0
-option lease 86400
-lease_file /run/udhcpd.leases
-EOF
-    touch /run/udhcpd.leases
-    busybox udhcpd /etc/udhcpd.conf
-    busybox telnetd -l /bin/sh
-}
-setup_usb &
-
-# --- Start Dropbear SSH Daemon ---
-if [ -x /usr/sbin/dropbear ] || [ -x /usr/bin/dropbear ]; then
-    mkdir -p /etc/dropbear /root/.ssh
-    chmod 700 /root/.ssh
-    dropbear -r /etc/dropbear/dropbear_ed25519_host_key -B -p 22 2>/dev/null
-    echo "redfin-init: dropbear SSH daemon active on port 22" > /dev/kmsg
-fi
-
-# --- Hardware: Populate partition labels ---
-populate_partlabels() {
-    i=0
-    while [ $i -lt 15 ]; do
-        ls /sys/class/block/sd* >/dev/null 2>&1 && break
-        sleep 1; i=$((i + 1))
-    done
-    mkdir -p /dev/disk/by-partlabel
-    for u in /sys/class/block/sd*/uevent; do
-        [ -e "$u" ] || continue
-        dev=$(basename "$(dirname "$u")")
-        part=$(awk -F= '/^PARTNAME=/{print $2}' "$u")
-        [ -n "$part" ] && ln -sf "/dev/$dev" "/dev/disk/by-partlabel/$part"
-    done
-}
-populate_partlabels
-
-# --- Hardware: Qualcomm MPSS & WCN3990 Wi-Fi ---
-setup_wifi() {
-    mkdir -p /mnt/modem /lib/firmware/qcom/sm7250/google/redfin /lib/firmware/ath10k/WCN3990/hw1.0
-    for slot in modem_a modem_b; do
-        if [ -b "/dev/disk/by-partlabel/$slot" ]; then
-            if mount -t vfat -o ro "/dev/disk/by-partlabel/$slot" /mnt/modem 2>/dev/null; then
-                echo "redfin-init: mounted $slot at /mnt/modem" > /dev/kmsg
-                break
-            fi
-        fi
-    done
-    if [ -d /mnt/modem/image ]; then
-        for f in /mnt/modem/image/*; do
-            [ -e "$f" ] || continue
-            base=$(basename "$f")
-            [ -e "/lib/firmware/qcom/sm7250/google/redfin/$base" ] || ln -sf "$f" "/lib/firmware/qcom/sm7250/google/redfin/$base"
-        done
-        [ -e /mnt/modem/image/wlanmdsp.mbn ] && ln -sf /mnt/modem/image/wlanmdsp.mbn /lib/firmware/ath10k/WCN3990/hw1.0/wlanmdsp.mbn
-    fi
-
-    mkdir -p /readonly/vendor /readonly /var/lib/tqftpserv /run
-    ln -sf /mnt/modem /readonly/vendor/firmware_mnt 2>/dev/null
-    ln -sf /mnt/modem /readonly/firmware 2>/dev/null
-
-    # Boot MPSS remoteproc
-    for r in /sys/class/remoteproc/remoteproc*; do
-        [ -e "$r/name" ] || continue
-        rname=$(cat "$r/name" 2>/dev/null)
-        case "$rname" in
-            *mpss*|*modem*)
-                state=$(cat "$r/state" 2>/dev/null)
-                if [ "$state" != "running" ]; then
-                    echo "redfin-init: starting remoteproc $rname" > /dev/kmsg
-                    echo start > "$r/state" 2>/dev/null
-                fi
-                ;;
-        esac
-    done
-    sleep 1
-
-    command -v tqftpserv >/dev/null 2>&1 && tqftpserv -d >/run/tqftpserv.log 2>&1 &
-    command -v pd-mapper >/dev/null 2>&1 && pd-mapper >/run/pdmapper.log 2>&1 &
-    command -v rmtfs >/dev/null 2>&1 && rmtfs -r -P -s >/run/rmtfs.log 2>&1 &
-
-    w=0
-    while [ $w -lt 8 ] && [ ! -d /sys/class/net/wlan0 ]; do
-        sleep 1; w=$((w + 1))
-    done
-    if [ ! -d /sys/class/net/wlan0 ] && command -v pd-mapper >/dev/null 2>&1; then
-        killall pd-mapper 2>/dev/null
-        sleep 1
-        pd-mapper &
-    fi
-    w=0
-    while [ $w -lt 10 ] && [ ! -d /sys/class/net/wlan0 ]; do
-        sleep 1; w=$((w + 1))
-    done
-
-    if [ -d /sys/class/net/wlan0 ]; then
-        ifconfig wlan0 up 2>/dev/null
-        echo "redfin-init: wlan0 is UP" > /dev/kmsg
-        mkdir -p /var/run/wpa_supplicant
-        wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf 2>/dev/null
-        busybox udhcpc -i wlan0 -b -n 2>/dev/null &
-    fi
-}
-setup_wifi &
-
-# --- OLED Panel GUI ---
-start_display() {
-    i=0
-    while [ $i -lt 15 ] && [ ! -e /dev/dri/card0 ]; do
-        sleep 1; i=$((i + 1))
-    done
-    # Turn on backlight
-    for b in /sys/class/backlight/*; do
-        [ -e "$b/max_brightness" ] && cat "$b/max_brightness" > "$b/brightness" 2>/dev/null
-    done
-    if [ -x /usr/bin/serverui ]; then
-        echo "redfin-init: starting Ubuntu serverui GUI on OLED panel" > /dev/kmsg
-        /usr/bin/serverui &
-    fi
-}
-start_display &
-
-# Keep an interactive root shell on serial/console
-exec /bin/sh
-"""
-
-with open(os.path.join(ROOTFS, "init"), "w") as f:
-    f.write(init_script)
+# 6. Install proven /init script and setup busybox applets
+print("Installing proven /init script and busybox applets...")
+shutil.copy2(os.path.join(REPO_ROOT, "initramfs/init"), os.path.join(ROOTFS, "init"))
 os.chmod(os.path.join(ROOTFS, "init"), 0o755)
+
+# Install busybox symlinks
+subprocess.run([proot_bin, "-0", "-r", ROOTFS, "-q", qemu_bin, "/usr/bin/busybox", "--install", "-s", "/usr/bin"], check=True)
 
 # 7. Strip docs/locales to optimize image size
 print("Optimizing rootfs size...")
