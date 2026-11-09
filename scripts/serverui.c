@@ -46,8 +46,24 @@ typedef enum {
     STATE_MAIN = 0,
     STATE_POWER_POPUP = 1,
     STATE_WIFI_POPUP = 2,
-    STATE_SCREEN_OFF = 3
+    STATE_BATTERY_POPUP = 3,
+    STATE_SCREEN_OFF = 4
 } ui_state_t;
+
+typedef struct {
+    int vbat_mv;         // Battery voltage in mV
+    int usb_v_mv;        // USB voltage in mV
+    int vph_mv;          // System rail voltage in mV
+    int chg_temp_mc;     // Charger / PMIC temp in mC
+    int percentage;      // 0 - 100 %
+    int is_charging;     // 1 if USB connected, 0 if discharging on battery
+    int is_full;         // 1 if fully charged (>= 98% and plugged in)
+    int est_hours;       // estimated discharge runtime hours
+    int est_minutes;     // estimated discharge runtime minutes
+    char status_str[32]; // "Charging", "Discharging", "Full (Plugged In)"
+} battery_info_t;
+
+static battery_info_t cur_battery;
 
 typedef struct {
     int x0, y0, w, h;
@@ -167,6 +183,87 @@ static void commit_frame(void) {
     xioctl(drm_fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf);
 }
 
+static void query_battery_info(battery_info_t *b) {
+    int vbat_uv = 0, usb_v_uv = 0, vph_uv = 0, chg_temp_mc = 0;
+    FILE *f;
+    f = fopen("/sys/bus/iio/devices/iio:device2/in_voltage_vbat_sns_input", "r");
+    if (f) { if (fscanf(f, "%d", &vbat_uv) != 1) vbat_uv = 0; fclose(f); }
+    f = fopen("/sys/bus/iio/devices/iio:device2/in_voltage_usb_in_v_div_16_input", "r");
+    if (f) { if (fscanf(f, "%d", &usb_v_uv) != 1) usb_v_uv = 0; fclose(f); }
+    f = fopen("/sys/bus/iio/devices/iio:device2/in_voltage_vph_pwr_input", "r");
+    if (f) { if (fscanf(f, "%d", &vph_uv) != 1) vph_uv = 0; fclose(f); }
+    f = fopen("/sys/bus/iio/devices/iio:device2/in_temp_chg_temp_input", "r");
+    if (f) { if (fscanf(f, "%d", &chg_temp_mc) != 1) chg_temp_mc = 0; fclose(f); }
+
+    b->vbat_mv = vbat_uv > 0 ? (vbat_uv / 1000) : 4200;
+    b->usb_v_mv = usb_v_uv / 1000;
+    b->vph_mv = vph_uv / 1000;
+    b->chg_temp_mc = chg_temp_mc > 0 ? chg_temp_mc : 32000;
+
+    // Detect charging vs discharging (USB input > 4.0V)
+    if (b->usb_v_mv > 4000) {
+        b->is_charging = 1;
+    } else {
+        b->is_charging = 0;
+    }
+
+    // Li-Ion OCV State of Charge curve for Pixel 5 (4.45V cell)
+    static const struct { int mv; int pct; } ocv_table[] = {
+        { 4400, 100 },
+        { 4300, 90 },
+        { 4180, 80 },
+        { 4060, 70 },
+        { 3960, 60 },
+        { 3880, 50 },
+        { 3820, 40 },
+        { 3760, 30 },
+        { 3700, 20 },
+        { 3620, 10 },
+        { 3500, 5 },
+        { 3400, 0 }
+    };
+    int n_points = sizeof(ocv_table) / sizeof(ocv_table[0]);
+
+    int pct = 0;
+    if (b->vbat_mv >= ocv_table[0].mv) {
+        pct = 100;
+    } else if (b->vbat_mv <= ocv_table[n_points - 1].mv) {
+        pct = 0;
+    } else {
+        for (int i = 0; i < n_points - 1; i++) {
+            if (b->vbat_mv <= ocv_table[i].mv && b->vbat_mv >= ocv_table[i + 1].mv) {
+                int dv = ocv_table[i].mv - ocv_table[i + 1].mv;
+                int dp = ocv_table[i].pct - ocv_table[i + 1].pct;
+                int off = b->vbat_mv - ocv_table[i + 1].mv;
+                pct = ocv_table[i + 1].pct + (off * dp) / dv;
+                break;
+            }
+        }
+    }
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    b->percentage = pct;
+
+    if (b->is_charging) {
+        if (pct >= 98) {
+            b->is_full = 1;
+            strncpy(b->status_str, "Full (Plugged In)", sizeof(b->status_str) - 1);
+        } else {
+            b->is_full = 0;
+            strncpy(b->status_str, "Charging", sizeof(b->status_str) - 1);
+        }
+        b->est_hours = 0;
+        b->est_minutes = 0;
+    } else {
+        b->is_full = 0;
+        strncpy(b->status_str, "Discharging", sizeof(b->status_str) - 1);
+        double rem_mah = 4080.0 * (pct / 100.0);
+        double total_hours = rem_mah / 130.0;
+        b->est_hours = (int)total_hours;
+        b->est_minutes = (int)((total_hours - b->est_hours) * 60.0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Hardware & System Metric Queries
 // ---------------------------------------------------------------------------
@@ -253,16 +350,19 @@ static void refresh_system_info(void) {
     }
 
     // Battery / Power telemetry
-    int vbat_uv = 0, pmic_temp = 0, cpu_temp = 0;
-    f = fopen("/sys/bus/iio/devices/iio:device2/in_voltage_vbat_sns_input", "r");
-    if (f) { fscanf(f, "%d", &vbat_uv); fclose(f); }
-    f = fopen("/sys/bus/iio/devices/iio:device2/in_temp_die_temp_input", "r");
-    if (f) { fscanf(f, "%d", &pmic_temp); fclose(f); }
-    f = fopen("/sys/class/thermal/thermal_zone7/temp", "r");
-    if (f) { fscanf(f, "%d", &cpu_temp); fclose(f); }
+    query_battery_info(&cur_battery);
 
-    double vbat_v = vbat_uv / 1000000.0;
-    snprintf(sys_info_lines[num_info_lines++], 96, "Power: %.2f V | ~0.50W (Idle Server)", vbat_v > 0 ? vbat_v : 4.20);
+    if (cur_battery.is_charging) {
+        snprintf(sys_info_lines[num_info_lines++], 96, "Power: %d%% [%s] (%.2fV)",
+                 cur_battery.percentage, cur_battery.status_str, cur_battery.vbat_mv / 1000.0);
+    } else {
+        snprintf(sys_info_lines[num_info_lines++], 96, "Power: %d%% [Discharging ~%dh%02dm] (%.2fV)",
+                 cur_battery.percentage, cur_battery.est_hours, cur_battery.est_minutes, cur_battery.vbat_mv / 1000.0);
+    }
+
+    int pmic_temp = cur_battery.chg_temp_mc, cpu_temp = 0;
+    f = fopen("/sys/class/thermal/thermal_zone7/temp", "r");
+    if (f) { if (fscanf(f, "%d", &cpu_temp) != 1) cpu_temp = 0; fclose(f); }
     snprintf(sys_info_lines[num_info_lines++], 96, "Temp : CPU %.1f C | PMIC %.1f C", cpu_temp / 1000.0, pmic_temp / 1000.0);
 
     // Uptime
@@ -337,19 +437,104 @@ static void render_main_view(void) {
 
     // Setup Main View Buttons
     num_buttons = 0;
-    int btn_w = 960, btn_h = 130, bx = 60;
-    // Action 1: Refresh Info
-    register_button(bx, 1000, btn_w, btn_h, "[ Refresh Status ]", 101, 0);
-    // Action 2: Wi-Fi Management
-    register_button(bx, 1160, btn_w, btn_h, "[ Manage Wi-Fi Networks ]", 102, 0);
-    // Action 3: Power Menu (Shutdown, Restart, Lock Screen)
-    register_button(bx, 1320, btn_w, btn_h, "[ Power & Screen Menu ]", 103, 0x00831843);
+    int btn_w = 960, btn_h = 115, bx = 60;
+    // Action 101: Refresh Info
+    register_button(bx, 970, btn_w, btn_h, "[ Refresh Status ]", 101, 0);
+    // Action 104: Battery Details
+    register_button(bx, 1105, btn_w, btn_h, "[ Battery & Power Details ]", 104, 0x00065f46);
+    // Action 102: Wi-Fi Management
+    register_button(bx, 1240, btn_w, btn_h, "[ Manage Wi-Fi Networks ]", 102, 0);
+    // Action 103: Power Menu (Shutdown, Restart, Lock Screen)
+    register_button(bx, 1375, btn_w, btn_h, "[ Power & Screen Menu ]", 103, 0x00831843);
 
     draw_all_buttons();
 
     // Footer Hint
-    draw_text_centered(60, 1500, 960, 40, "Press Vol +/- to Navigate | Power key to Select", 2, COLOR_TEXT_MUT);
-    draw_text_centered(60, 1540, 960, 40, "Or Tap Any Button Directly on Screen", 2, COLOR_TEXT_MUT);
+    draw_text_centered(60, 1530, 960, 40, "Press Vol +/- to Navigate | Power key to Select", 2, COLOR_TEXT_MUT);
+    draw_text_centered(60, 1570, 960, 40, "Or Tap Any Button Directly on Screen", 2, COLOR_TEXT_MUT);
+}
+
+static void render_battery_popup(void) {
+    render_main_view();
+
+    int px = 60, py = 280, pw = 960, ph = 1260;
+    fill_rect(px, py, pw, ph, COLOR_MODAL_BG);
+    draw_rect_border(px, py, pw, ph, 6, COLOR_MODAL_BD);
+
+    // Title Header
+    fill_rect(px, py, pw, 70, 0x001e293b);
+    draw_text_centered(px, py, pw, 70, "BATTERY & POWER DETAILS", 2, COLOR_CYAN);
+
+    // Visual Percentage Progress Bar
+    int bar_x = px + 60, bar_y = py + 105, bar_w = pw - 120, bar_h = 55;
+    fill_rect(bar_x, bar_y, bar_w, bar_h, 0x001e293b);
+    draw_rect_border(bar_x, bar_y, bar_w, bar_h, 3, COLOR_CARD_BD);
+    int fill_w = (bar_w - 6) * cur_battery.percentage / 100;
+    uint32_t bar_col = cur_battery.is_charging ? COLOR_GREEN : (cur_battery.percentage < 20 ? COLOR_RED : COLOR_YELLOW);
+    if (fill_w > 0) {
+        fill_rect(bar_x + 3, bar_y + 3, fill_w, bar_h - 6, bar_col);
+    }
+    char bar_text[48];
+    snprintf(bar_text, sizeof(bar_text), "%d%% - %s", cur_battery.percentage, cur_battery.status_str);
+    draw_text_centered(bar_x, bar_y, bar_w, bar_h, bar_text, 2, 0x00ffffff);
+
+    // Metric lines
+    int cur_y = py + 190;
+    char line[96];
+
+    snprintf(line, sizeof(line), "Charge Level    : %d%%", cur_battery.percentage);
+    draw_text(px + 60, cur_y, line, 2, COLOR_TEXT_PRI);
+    cur_y += 65;
+
+    snprintf(line, sizeof(line), "Power Status    : %s", cur_battery.status_str);
+    draw_text(px + 60, cur_y, line, 2, bar_col);
+    cur_y += 65;
+
+    if (!cur_battery.is_charging) {
+        if (cur_battery.est_hours >= 24) {
+            snprintf(line, sizeof(line), "Time Remaining  : ~%dd %dh %02dm left", cur_battery.est_hours / 24, cur_battery.est_hours % 24, cur_battery.est_minutes);
+        } else {
+            snprintf(line, sizeof(line), "Time Remaining  : ~%dh %02dm left", cur_battery.est_hours, cur_battery.est_minutes);
+        }
+        draw_text(px + 60, cur_y, line, 2, COLOR_GREEN);
+        cur_y += 65;
+
+        snprintf(line, sizeof(line), "Estimated Drain : ~130 mA (~0.50W idle)");
+        draw_text(px + 60, cur_y, line, 2, COLOR_TEXT_MUT);
+        cur_y += 65;
+    } else {
+        snprintf(line, sizeof(line), "Power Source    : USB Charger (Connected)");
+        draw_text(px + 60, cur_y, line, 2, COLOR_CYAN);
+        cur_y += 65;
+
+        snprintf(line, sizeof(line), "Charging Mode   : Active (USB VBUS 5V)");
+        draw_text(px + 60, cur_y, line, 2, COLOR_TEXT_MUT);
+        cur_y += 65;
+    }
+
+    snprintf(line, sizeof(line), "Battery Voltage : %.3f V (Range: 3.40V - 4.45V)", cur_battery.vbat_mv / 1000.0);
+    draw_text(px + 60, cur_y, line, 2, COLOR_TEXT_PRI);
+    cur_y += 65;
+
+    snprintf(line, sizeof(line), "USB VBUS Input  : %.3f V", cur_battery.usb_v_mv / 1000.0);
+    draw_text(px + 60, cur_y, line, 2, COLOR_TEXT_PRI);
+    cur_y += 65;
+
+    snprintf(line, sizeof(line), "System VPH Rail : %.3f V", cur_battery.vph_mv / 1000.0);
+    draw_text(px + 60, cur_y, line, 2, COLOR_TEXT_PRI);
+    cur_y += 65;
+
+    snprintf(line, sizeof(line), "Design Capacity : 4080 mAh (15.7 Wh Li-Po)");
+    draw_text(px + 60, cur_y, line, 2, COLOR_TEXT_MUT);
+    cur_y += 65;
+
+    snprintf(line, sizeof(line), "Battery / PMIC  : %.1f C (Optimal)", cur_battery.chg_temp_mc / 1000.0);
+    draw_text(px + 60, cur_y, line, 2, COLOR_TEXT_MUT);
+    cur_y += 85;
+
+    num_buttons = 0;
+    register_button(px + 60, cur_y, pw - 120, 110, "[ Close / Back ]", 401, 0x00334155);
+    draw_all_buttons();
 }
 
 static void render_power_popup(void) {
@@ -417,6 +602,8 @@ static void render_current_ui(void) {
         render_power_popup();
     } else if (cur_state == STATE_WIFI_POPUP) {
         render_wifi_popup();
+    } else if (cur_state == STATE_BATTERY_POPUP) {
+        render_battery_popup();
     }
     commit_frame();
 }
@@ -489,6 +676,12 @@ static void execute_action(int action_id) {
             refresh_system_info();
             render_current_ui();
             break;
+        case 104: // Open Battery Details
+            query_battery_info(&cur_battery);
+            cur_state = STATE_BATTERY_POPUP;
+            focus_idx = 0;
+            render_current_ui();
+            break;
         case 102: // Open Wi-Fi Manager
             scan_wifi_networks();
             cur_state = STATE_WIFI_POPUP;
@@ -524,7 +717,7 @@ static void execute_action(int action_id) {
             exit(0);
         case 204: // Cancel Power Popup
             cur_state = STATE_MAIN;
-            focus_idx = 2; // return focus to Power Menu button
+            focus_idx = 3; // return focus to Power Menu button
             render_current_ui();
             break;
         case 350: // Wi-Fi Scan Again
@@ -533,7 +726,12 @@ static void execute_action(int action_id) {
             break;
         case 351: // Close Wi-Fi Manager
             cur_state = STATE_MAIN;
-            focus_idx = 1;
+            focus_idx = 2; // return focus to Wi-Fi button
+            render_current_ui();
+            break;
+        case 401: // Close Battery Details
+            cur_state = STATE_MAIN;
+            focus_idx = 1; // return focus to Battery Details button
             render_current_ui();
             break;
         default:
@@ -640,6 +838,8 @@ int main(int argc, char **argv) {
         commit_frame();
         usleep(80000);
     }
+    FILE *f_bl = fopen(BACKLIGHT_PATH, "w");
+    if (f_bl) { fprintf(f_bl, "%d\n", saved_brightness > 0 ? saved_brightness : 511); fclose(f_bl); }
 
     // 3. Open Input Devices (Buttons: Power, Vol Down, Vol Up, and Touch)
     int fd_pwr = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
