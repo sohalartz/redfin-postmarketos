@@ -143,7 +143,60 @@ setup_firmware_and_wifi() {
 }
 setup_firmware_and_wifi &
 
-# 8. Interactive Server UI supervisor loop
+# 8. Power management utilities (reboot, poweroff, shutdown)
+setup_power_commands() {
+    cat << 'EOF' > /usr/local/bin/reboot
+#!/bin/sh
+echo "Rebooting home server..."
+sync
+echo s > /proc/sysrq-trigger 2>/dev/null
+sleep 1
+echo u > /proc/sysrq-trigger 2>/dev/null
+exec /usr/bin/busybox reboot -f "$@"
+EOF
+    chmod 755 /usr/local/bin/reboot
+    ln -sf /usr/local/bin/reboot /sbin/reboot
+    ln -sf /usr/local/bin/reboot /usr/sbin/reboot
+    ln -sf /usr/local/bin/reboot /usr/bin/reboot
+
+    cat << 'EOF' > /usr/local/bin/poweroff
+#!/bin/sh
+echo "Powering off home server..."
+for b in /sys/class/backlight/*/brightness; do [ -e "$b" ] && echo 0 > "$b" 2>/dev/null; done
+sync
+echo s > /proc/sysrq-trigger 2>/dev/null
+sleep 1
+echo u > /proc/sysrq-trigger 2>/dev/null
+exec /usr/bin/busybox poweroff -f "$@"
+EOF
+    chmod 755 /usr/local/bin/poweroff
+    ln -sf /usr/local/bin/poweroff /sbin/poweroff
+    ln -sf /usr/local/bin/poweroff /usr/sbin/poweroff
+    ln -sf /usr/local/bin/poweroff /usr/bin/poweroff
+
+    cat << 'EOF' > /usr/local/bin/shutdown
+#!/bin/sh
+is_reboot=0
+for arg in "$@"; do
+    case "$arg" in
+        -r|--reboot) is_reboot=1 ;;
+        -h|-P|--poweroff|-H|--halt) is_reboot=0 ;;
+    esac
+done
+if [ "$is_reboot" -eq 1 ]; then
+    exec /usr/local/bin/reboot
+else
+    exec /usr/local/bin/poweroff
+fi
+EOF
+    chmod 755 /usr/local/bin/shutdown
+    ln -sf /usr/local/bin/shutdown /sbin/shutdown
+    ln -sf /usr/local/bin/shutdown /usr/sbin/shutdown
+    ln -sf /usr/local/bin/shutdown /usr/bin/shutdown
+}
+setup_power_commands
+
+# 9. Interactive Server UI supervisor loop
 launch_ui() {
     i=0
     while [ $i -lt 15 ] && [ ! -e /dev/dri/card0 ]; do sleep 1; i=$((i + 1)); done
