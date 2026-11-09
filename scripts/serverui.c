@@ -21,6 +21,7 @@
 #include "font8x16.h"
 
 #define BACKLIGHT_PATH "/sys/class/backlight/ae94000.dsi.0/brightness"
+#define SCREEN_TIMEOUT_MS 30000
 #define W 1080
 #define H 2340
 
@@ -64,6 +65,7 @@ static uint32_t fb_stride = 0;
 static ui_state_t cur_state = STATE_MAIN;
 static int focus_idx = 0;
 static int saved_brightness = 511;
+static long long last_activity_ms = 0;
 
 // Button definitions
 #define MAX_BUTTONS 16
@@ -439,6 +441,9 @@ static void set_display_blank(int blank) {
         if (f) { fprintf(f, "%d\n", saved_brightness); fclose(f); }
         cur_state = STATE_MAIN;
         focus_idx = 0;
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        last_activity_ms = (long long)now.tv_sec * 1000 + now.tv_usec / 1000;
         refresh_system_info();
         render_current_ui();
     }
@@ -636,6 +641,10 @@ int main(int argc, char **argv) {
     long long last_btn_ms = 0;
     int touch_x = 0, touch_y = 0;
 
+    struct timeval tv_boot;
+    gettimeofday(&tv_boot, NULL);
+    last_activity_ms = (long long)tv_boot.tv_sec * 1000 + tv_boot.tv_usec / 1000;
+
     // 4. Main Event Loop
     while (1) {
         fd_set fds;
@@ -646,13 +655,19 @@ int main(int argc, char **argv) {
         if (fd_volup >= 0) { FD_SET(fd_volup, &fds); if (fd_volup > max_fd) max_fd = fd_volup; }
         if (fd_touch >= 0) { FD_SET(fd_touch, &fds); if (fd_touch > max_fd) max_fd = fd_touch; }
 
-        struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
         int sel = select(max_fd + 1, &fds, NULL, NULL, &tv);
-        if (sel <= 0) continue;
 
         struct timeval now;
         gettimeofday(&now, NULL);
         long long now_ms = (long long)now.tv_sec * 1000 + now.tv_usec / 1000;
+
+        // Auto screen turn off after 30 seconds of inactivity
+        if (cur_state != STATE_SCREEN_OFF && (now_ms - last_activity_ms >= SCREEN_TIMEOUT_MS)) {
+            set_display_blank(1);
+        }
+
+        if (sel <= 0) continue;
 
         struct input_event ev;
 
@@ -662,6 +677,7 @@ int main(int argc, char **argv) {
                 if (ev.type == EV_KEY && ev.code == KEY_POWER && ev.value == 1) {
                     if (now_ms - last_btn_ms < 300) continue;
                     last_btn_ms = now_ms;
+                    last_activity_ms = now_ms;
 
                     if (cur_state == STATE_SCREEN_OFF) {
                         // Wake up screen!
@@ -682,6 +698,7 @@ int main(int argc, char **argv) {
                 if (ev.type == EV_KEY && ev.value == 1) {
                     if (now_ms - last_btn_ms < 200) continue;
                     last_btn_ms = now_ms;
+                    last_activity_ms = now_ms;
                     if (cur_state != STATE_SCREEN_OFF && num_buttons > 0) {
                         focus_idx = (focus_idx + 1) % num_buttons;
                         render_current_ui();
@@ -696,6 +713,7 @@ int main(int argc, char **argv) {
                 if (ev.type == EV_KEY && ev.value == 1) {
                     if (now_ms - last_btn_ms < 200) continue;
                     last_btn_ms = now_ms;
+                    last_activity_ms = now_ms;
                     if (cur_state != STATE_SCREEN_OFF && num_buttons > 0) {
                         focus_idx = (focus_idx + num_buttons - 1) % num_buttons;
                         render_current_ui();
@@ -707,6 +725,7 @@ int main(int argc, char **argv) {
         // --- Touchscreen Event ---
         if (fd_touch >= 0 && FD_ISSET(fd_touch, &fds)) {
             while (read(fd_touch, &ev, sizeof(ev)) == sizeof(ev)) {
+                last_activity_ms = now_ms;
                 if (ev.type == EV_ABS) {
                     if (ev.code == ABS_MT_POSITION_X || ev.code == ABS_X) touch_x = ev.value;
                     if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y) touch_y = ev.value;
