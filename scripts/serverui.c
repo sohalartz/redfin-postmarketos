@@ -173,11 +173,32 @@ static int num_info_lines = 0;
 
 static void refresh_system_info(void) {
     num_info_lines = 0;
+    FILE *f;
+
+    // OS & Distro Info
+    char os_name[64] = "Linux";
+    f = fopen("/etc/os-release", "r");
+    if (f) {
+        char line[128];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "PRETTY_NAME=", 12) == 0) {
+                char *val = line + 12;
+                if (*val == '"') val++;
+                char *end = strchr(val, '"');
+                if (!end) end = strchr(val, '\n');
+                if (end) *end = 0;
+                snprintf(os_name, sizeof(os_name), "%s", val);
+                break;
+            }
+        }
+        fclose(f);
+    }
+    snprintf(sys_info_lines[num_info_lines++], 96, "OS   : %s", os_name);
 
     // CPU Cores & Frequency
     int ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     int cur_freq_mhz = 0;
-    FILE *f = fopen("/sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq", "r");
+    f = fopen("/sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq", "r");
     if (f) {
         int khz = 0;
         if (fscanf(f, "%d", &khz) == 1) cur_freq_mhz = khz / 1000;
@@ -304,11 +325,12 @@ static void render_main_view(void) {
     int line_y = card_y + 80;
     for (int i = 0; i < num_info_lines; i++) {
         uint32_t col = COLOR_TEXT_PRI;
-        if (strstr(sys_info_lines[i], "WiFi")) col = COLOR_GREEN;
+        if (strstr(sys_info_lines[i], "OS")) col = COLOR_CYAN;
+        else if (strstr(sys_info_lines[i], "WiFi")) col = COLOR_GREEN;
         else if (strstr(sys_info_lines[i], "SSH")) col = COLOR_CYAN;
         else if (strstr(sys_info_lines[i], "Power")) col = COLOR_YELLOW;
         draw_text(card_x + 30, line_y, sys_info_lines[i], 2, col);
-        line_y += 75;
+        line_y += 70;
     }
 
     // Setup Main View Buttons
