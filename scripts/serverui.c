@@ -437,8 +437,7 @@ static void set_display_blank(int blank) {
     } else {
         unlink("/run/screen_off");
         if (saved_brightness <= 0) saved_brightness = 511;
-        FILE *f = fopen(BACKLIGHT_PATH, "w");
-        if (f) { fprintf(f, "%d\n", saved_brightness); fclose(f); }
+
         cur_state = STATE_MAIN;
         focus_idx = 0;
         struct timeval now;
@@ -446,6 +445,22 @@ static void set_display_blank(int blank) {
         last_activity_ms = (long long)now.tv_sec * 1000 + now.tv_usec / 1000;
         refresh_system_info();
         render_current_ui();
+
+        // 1. Re-latch CRTC for Samsung command-mode DSI OLED panel
+        struct drm_mode_crtc sc = { .crtc_id = crtc_id, .fb_id = fb_id, .set_connectors_ptr = (uintptr_t)&conn_id,
+                                    .count_connectors = 1, .mode = cur_mode, .mode_valid = 1 };
+        xioctl(drm_fd, DRM_IOCTL_MODE_SETCRTC, &sc);
+
+        // 2. Commit flip multiple times to ensure frame latching in panel GRAM
+        for (int i = 0; i < 3; i++) {
+            struct drm_mode_crtc_page_flip pf = { .crtc_id = crtc_id, .fb_id = fb_id };
+            xioctl(drm_fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf);
+            usleep(60000);
+        }
+
+        // 3. Restore backlight
+        FILE *f = fopen(BACKLIGHT_PATH, "w");
+        if (f) { fprintf(f, "%d\n", saved_brightness); fclose(f); }
     }
 }
 
@@ -675,18 +690,21 @@ int main(int argc, char **argv) {
         if (fd_pwr >= 0 && FD_ISSET(fd_pwr, &fds)) {
             while (read(fd_pwr, &ev, sizeof(ev)) == sizeof(ev)) {
                 if (ev.type == EV_KEY && ev.code == KEY_POWER && ev.value == 1) {
+                    if (cur_state == STATE_SCREEN_OFF) {
+                        // Instant wake-up on Power key press
+                        last_btn_ms = now_ms;
+                        last_activity_ms = now_ms;
+                        set_display_blank(0);
+                        continue;
+                    }
+
                     if (now_ms - last_btn_ms < 300) continue;
                     last_btn_ms = now_ms;
                     last_activity_ms = now_ms;
 
-                    if (cur_state == STATE_SCREEN_OFF) {
-                        // Wake up screen!
-                        set_display_blank(0);
-                    } else {
-                        // Click current focused button
-                        if (focus_idx >= 0 && focus_idx < num_buttons) {
-                            execute_action(buttons[focus_idx].action_id);
-                        }
+                    // Click current focused button
+                    if (focus_idx >= 0 && focus_idx < num_buttons) {
+                        execute_action(buttons[focus_idx].action_id);
                     }
                 }
             }
@@ -696,12 +714,18 @@ int main(int argc, char **argv) {
         if (fd_voldn >= 0 && FD_ISSET(fd_voldn, &fds)) {
             while (read(fd_voldn, &ev, sizeof(ev)) == sizeof(ev)) {
                 if (ev.type == EV_KEY && ev.value == 1) {
+                    if (cur_state == STATE_SCREEN_OFF) {
+                        // Instant wake-up on Vol Down
+                        last_btn_ms = now_ms;
+                        last_activity_ms = now_ms;
+                        set_display_blank(0);
+                        continue;
+                    }
+
                     if (now_ms - last_btn_ms < 200) continue;
                     last_btn_ms = now_ms;
                     last_activity_ms = now_ms;
-                    if (cur_state == STATE_SCREEN_OFF) {
-                        set_display_blank(0);
-                    } else if (num_buttons > 0) {
+                    if (num_buttons > 0) {
                         focus_idx = (focus_idx + 1) % num_buttons;
                         render_current_ui();
                     }
@@ -713,12 +737,18 @@ int main(int argc, char **argv) {
         if (fd_volup >= 0 && FD_ISSET(fd_volup, &fds)) {
             while (read(fd_volup, &ev, sizeof(ev)) == sizeof(ev)) {
                 if (ev.type == EV_KEY && ev.value == 1) {
+                    if (cur_state == STATE_SCREEN_OFF) {
+                        // Instant wake-up on Vol Up
+                        last_btn_ms = now_ms;
+                        last_activity_ms = now_ms;
+                        set_display_blank(0);
+                        continue;
+                    }
+
                     if (now_ms - last_btn_ms < 200) continue;
                     last_btn_ms = now_ms;
                     last_activity_ms = now_ms;
-                    if (cur_state == STATE_SCREEN_OFF) {
-                        set_display_blank(0);
-                    } else if (num_buttons > 0) {
+                    if (num_buttons > 0) {
                         focus_idx = (focus_idx + num_buttons - 1) % num_buttons;
                         render_current_ui();
                     }
@@ -729,6 +759,11 @@ int main(int argc, char **argv) {
         // --- Touchscreen Event ---
         if (fd_touch >= 0 && FD_ISSET(fd_touch, &fds)) {
             while (read(fd_touch, &ev, sizeof(ev)) == sizeof(ev)) {
+                if (cur_state == STATE_SCREEN_OFF) {
+                    last_activity_ms = now_ms;
+                    set_display_blank(0);
+                    continue;
+                }
                 last_activity_ms = now_ms;
                 if (ev.type == EV_ABS) {
                     if (ev.code == ABS_MT_POSITION_X || ev.code == ABS_X) touch_x = ev.value;
