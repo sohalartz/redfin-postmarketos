@@ -78,9 +78,11 @@ fi
 # Start dropbear SSH daemon if available
 if command -v dropbear >/dev/null 2>&1; then
 	mkdir -p /etc/dropbear /root/.ssh
-	chmod 700 /root/.ssh
+	chmod 700 /root /root/.ssh
+	chown -R 0:0 /root
+	[ -e /root/.ssh/authorized_keys ] && chmod 600 /root/.ssh/authorized_keys
 	[ -e /etc/dropbear/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null
-	dropbear -r /etc/dropbear/dropbear_ed25519_host_key -E -p 22 2>/dev/null || dropbear -r /etc/dropbear/dropbear_ed25519_host_key -B -p 22 2>/dev/null
+	dropbear -r /etc/dropbear/dropbear_ed25519_host_key -B -E -p 22 2>/dev/null
 	echo "redfin-init: dropbear SSH daemon started on port 22" > /dev/kmsg
 fi
 
@@ -190,8 +192,8 @@ setup_firmware_and_wifi &
 # --- Switch_root to persistent Ubuntu rootfs on UFS (/dev/sda18) ---
 if ! grep -qw redfin.boot=ramfs /proc/cmdline; then
 	i=0
-	while [ $i -lt 10 ]; do
-		rootdev=$(findfs LABEL=ubuntu_root 2>/dev/null || findfs LABEL=pmos_root 2>/dev/null) && [ -n "$rootdev" ] && break
+	while [ $i -lt 15 ]; do
+		rootdev=$(findfs LABEL=ubuntu_root 2>/dev/null || findfs LABEL=pmos_root 2>/dev/null || ([ -b /dev/sda18 ] && echo /dev/sda18) || ([ -b /dev/disk/by-partlabel/super ] && echo /dev/disk/by-partlabel/super)) && [ -n "$rootdev" ] && break
 		sleep 1; i=$((i + 1))
 	done
 	mkdir -p /newroot
@@ -203,12 +205,12 @@ if ! grep -qw redfin.boot=ramfs /proc/cmdline; then
 
 		if [ -n "$init_bin" ]; then
 			echo "redfin-init: switching root to persistent Ubuntu rootfs on $rootdev ($init_bin)" > /dev/kmsg
-			storagedev=$(findfs LABEL=storage 2>/dev/null)
-			if [ -n "$storagedev" ]; then
+			storagedev=$(findfs LABEL=storage 2>/dev/null || ([ -b /dev/sda19 ] && echo /dev/sda19) || ([ -b /dev/disk/by-partlabel/userdata ] && echo /dev/disk/by-partlabel/userdata))
+			if [ -n "$storagedev" ] && [ -b "$storagedev" ]; then
 				mkdir -p /newroot/mnt
 				mount -o noatime "$storagedev" /newroot/mnt 2>/dev/null && echo "redfin-init: mounted 111.7GB storage at /mnt" > /dev/kmsg
 			fi
-			killall watchdog 2>/dev/null
+			killall watchdog dropbear telnetd 2>/dev/null
 			umount /sys/fs/pstore /sys/kernel/config 2>/dev/null
 			for m in dev proc sys run; do mount -o move /$m /newroot/$m; done
 			exec switch_root /newroot "$init_bin"
